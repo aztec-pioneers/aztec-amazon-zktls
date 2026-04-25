@@ -2,9 +2,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    // jsdom gives us DOMParser/XPathResult for plaintext re-extraction without
-    // forcing the test runner to spawn a full browser.
-    environment: "jsdom",
+    // We do not exercise the DOMParser-based extractor in tests anymore (the
+    // sidecar in the fixture supplies plaintexts), so a plain node env is
+    // enough — and bb.js's WASM SRS init under jsdom traps unreachable.
+    environment: "node",
     include: ["test/**/*.test.ts"],
     // Proving can take a while even on small circuits; the hashing pass over
     // 4 fields × ~4KB each on a debug build is the slow part.
