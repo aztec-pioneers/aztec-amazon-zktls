@@ -46,6 +46,9 @@ export interface CircuitInputs {
   signature: number[]; // 64 (r|s, no v)
   allowed_url: { storage: number[]; len: number };
   request_url: { storage: number[]; len: number };
+  recipient: number[]; // 20
+  // Noir u64; noir_js accepts decimal strings here.
+  timestamp: string;
   hashes: {
     shipment_status: number[]; // 32
     product_title: number[]; // 32
@@ -58,6 +61,14 @@ export interface CircuitInputs {
     ship_to: { storage: number[]; len: number };
     grand_total: { storage: number[]; len: number };
   };
+  // Hint: byte offsets and lengths into ship_to.storage for the four
+  // trimmed logical lines, in order [name, street, city_state_zip, country].
+  ship_to_hints: {
+    offsets: number[]; // 4
+    lens: number[]; // 4
+  };
+  // Hint: number of bytes between `>$` and `<` in grandTotal.
+  grand_total_len: number;
 }
 
 // Circuit parameters that must stay in sync with `lib/src/lib.nr`.
@@ -67,6 +78,13 @@ export const CIRCUIT_DIMS = {
   MAX_PRODUCT_TITLE_LEN: 1024,
   MAX_SHIP_TO_LEN: 1024,
   MAX_GRAND_TOTAL_LEN: 128,
+  MAX_NAME_LEN: 64,
+  MAX_STREET_LEN: 96,
+  MAX_CITY_STATE_ZIP_LEN: 96,
+  MAX_COUNTRY_LEN: 32,
+  // Cap on the number of bytes between `>$` and `<` in grandTotal
+  // (digits + thousands-commas + decimal period).
+  MAX_GRAND_TOTAL_DIGITS: 13,
 } as const;
 
 // Field names (Noir snake_case) mapped to the Primus SDK's camelCase keyName

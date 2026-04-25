@@ -21,6 +21,76 @@ import { encodeAttestation } from "./encode.js";
 
 const AMAZON_ALLOWED_URL = "https://www.amazon.com";
 
+// Anchor literals — must stay byte-identical to the comptime constants in
+// nr/lib/src/{ship_to,grand_total}.nr.
+const LI_OPEN = 'class="a-list-item">\n                '; // 37 B
+const LI_CLOSE = "\n            </span></li>"; // 25 B
+const BR = "<br>";
+
+function locateAll(haystack: string, needle: string): number[] {
+  const out: number[] = [];
+  let i = 0;
+  while (i <= haystack.length - needle.length) {
+    const found = haystack.indexOf(needle, i);
+    if (found === -1) break;
+    out.push(found);
+    i = found + 1;
+  }
+  return out;
+}
+
+function locateShipToHints(shipTo: string): {
+  offsets: number[];
+  lens: number[];
+} {
+  const opens = locateAll(shipTo, LI_OPEN);
+  const closes = locateAll(shipTo, LI_CLOSE);
+  if (opens.length !== 3 || closes.length !== 3) {
+    throw new Error(
+      `shipTo template mismatch: expected 3 <li> open/close pairs, got ${opens.length}/${closes.length}`,
+    );
+  }
+  // Content of <li>_i is [opens[i] + LI_OPEN.length, closes[i]).
+  const o = opens.map((p) => p + LI_OPEN.length);
+
+  // The second <li> contains a single <br> separating street and
+  // city_state_zip; assert exactly one and that it sits inside that range.
+  const brAll = locateAll(shipTo, BR).filter((p) => p > o[1] && p < closes[1]);
+  if (brAll.length !== 1) {
+    throw new Error(
+      `expected exactly one <br> inside the second <li>, found ${brAll.length}`,
+    );
+  }
+  const br = brAll[0];
+
+  // Lines: name, street, city_state_zip, country.
+  const offsets = [o[0], o[1], br + BR.length, o[2]];
+  const lens = [
+    closes[0] - o[0],
+    br - o[1],
+    closes[1] - (br + BR.length),
+    closes[2] - o[2],
+  ];
+  return { offsets, lens };
+}
+
+function locateGrandTotalLen(grandTotal: string): number {
+  const dollar = grandTotal.indexOf("$");
+  if (dollar === -1) throw new Error("$ not found in grandTotal");
+  // Walk past the digit run (digits + thousands-comma + decimal period).
+  // Stop at the first non-numeric byte (space, '<', whatever).
+  let end = dollar + 1;
+  while (end < grandTotal.length) {
+    const c = grandTotal.charCodeAt(end);
+    const isDigit = c >= 0x30 && c <= 0x39;
+    const isComma = c === 0x2c; // ','
+    const isPeriod = c === 0x2e; // '.'
+    if (!(isDigit || isComma || isPeriod)) break;
+    end++;
+  }
+  return end - (dollar + 1);
+}
+
 function hexToBytes(hex: string): Uint8Array {
   const s = hex.startsWith("0x") ? hex.slice(2) : hex;
   if (s.length % 2) throw new Error(`odd-length hex: ${hex}`);
@@ -169,6 +239,21 @@ export function parseAttestation(
     "request_url",
   );
 
+  // 7. Recipient (20-byte address) and timestamp (u64 as decimal string).
+  const recipientBytes = hexToBytes(att.recipient);
+  if (recipientBytes.length !== 20) {
+    throw new Error(`recipient must be 20 bytes, got ${recipientBytes.length}`);
+  }
+
+  // 8. Hints for the in-circuit extractors.
+  const ship_to_hints = locateShipToHints(plaintexts[FIELD_MAP.ship_to]);
+  const grand_total_len = locateGrandTotalLen(plaintexts[FIELD_MAP.grand_total]);
+  if (grand_total_len > CIRCUIT_DIMS.MAX_GRAND_TOTAL_DIGITS) {
+    throw new Error(
+      `grand_total digit window is ${grand_total_len} bytes, exceeds MAX=${CIRCUIT_DIMS.MAX_GRAND_TOTAL_DIGITS}`,
+    );
+  }
+
   return {
     public_key_x: Array.from(pubX),
     public_key_y: Array.from(pubY),
@@ -176,7 +261,11 @@ export function parseAttestation(
     signature: Array.from(compact),
     allowed_url,
     request_url,
+    recipient: Array.from(recipientBytes),
+    timestamp: String(att.timestamp),
     hashes: hashesByField,
     contents: contentsByField,
+    ship_to_hints,
+    grand_total_len,
   };
 }
