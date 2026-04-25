@@ -11,6 +11,9 @@ importers:
       '@primuslabs/network-core-sdk':
         specifier: ^0.1.13
         version: 0.1.13(@noble/hashes@1.8.0)(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
+      '@primuslabs/zktls-js-sdk':
+        specifier: ^0.3.12
+        version: 0.3.12(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
       ethers:
         specifier: ^5.8.0
         version: 5.8.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
@@ -598,6 +601,9 @@ packages:
 
   '@primuslabs/network-core-sdk@0.1.13':
     resolution: {integrity: sha512-Af/1jnjLuCoMkNij81I+2CJE+/bMPPeLaQtHxKvP8/7gRlfZtOlm/l8+3VCNf3pt3oHxo2EDGRJ4CezWPukiHg==}
+
+  '@primuslabs/zktls-js-sdk@0.3.12':
+    resolution: {integrity: sha512-aUwiEcl026FPoUqQhKIv4Q4fdlOTehYorSS4IXgoWRvY4AoijZtSDQ4B9PZlPYPuuG73tDGsTjFjlnOFtKu9SA==}
 
   '@rtsao/scc@1.1.0':
     resolution: {integrity: sha512-zt6OdqaDoOnJ1ZYsCYGt9YmWzDXl4vQdKTyJev62gFhRGKdx7mcT54V9KIjg+d2wi9EXsPvAPKe7i7WjfVWB8g==}
@@ -2990,6 +2996,17 @@ snapshots:
       - canvas
       - encoding
       - supports-color
+      - typescript
+      - utf-8-validate
+
+  '@primuslabs/zktls-js-sdk@0.3.12(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)':
+    dependencies:
+      '@solana/web3.js': 1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6)
+      ethers: 5.8.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
+      uuid: 11.1.0
+    transitivePeerDependencies:
+      - bufferutil
+      - encoding
       - typescript
       - utf-8-validate
 
