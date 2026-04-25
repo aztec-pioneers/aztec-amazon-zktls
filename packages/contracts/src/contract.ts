@@ -225,25 +225,28 @@ export async function fillOrder(
   },
 ): Promise<TxHash> {
   const escrowWithWallet = escrow.withWallet(wallet);
+  // For BoundedVec<u8, N> args, aztec.js takes a JS array of actual length
+  // and pads to N internally; passing the pre-padded storage would set
+  // BoundedVec.len = N which breaks length-aware logic (URL prefix check,
+  // sha256_var, etc). Slice to the real `len`.
+  const slice = (bv: { storage: number[]; len: number }) =>
+    bv.storage.slice(0, bv.len);
   const { receipt } = await escrowWithWallet.methods
     .fill_order(
       args.publicKeyX,
       args.publicKeyY,
       args.hash,
       args.signature,
-      // aztec.js codegen presents BoundedVec<u8, N> args as a flat number
-      // array. We pass the raw storage of fixed length N; the actual `len`
-      // is encoded by aztec.js or implicit in the storage zero-padding.
-      args.allowedUrl.storage,
-      args.requestUrl.storage,
+      slice(args.allowedUrl),
+      slice(args.requestUrl),
       args.recipient,
       args.timestamp,
       args.hashes,
       {
-        shipment_status: args.contents.shipment_status.storage,
-        product_title: args.contents.product_title.storage,
-        ship_to: args.contents.ship_to.storage,
-        grand_total: args.contents.grand_total.storage,
+        shipment_status: slice(args.contents.shipment_status),
+        product_title: slice(args.contents.product_title),
+        ship_to: slice(args.contents.ship_to),
+        grand_total: slice(args.contents.grand_total),
       },
       args.shipToHints,
       args.grandTotalLen,
