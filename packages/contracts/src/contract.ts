@@ -142,11 +142,13 @@ export async function deployTokenContract(
 }
 
 /**
- * Order creator deposits the bounty into the escrow. Authwit grants the
- * escrow permission to call `transfer_private_to_private(from, escrow, ...)`
- * on the payment token.
+ * Stage transition: OPEN.
+ *
+ * Order creator deposits the bounty into the escrow and pushes the
+ * OPEN-stage nullifier. Authwit grants the escrow permission to call
+ * `transfer_private_to_private(from, escrow, ...)` on the payment token.
  */
-export async function depositToEscrow(
+export async function openOrder(
   wallet: Wallet,
   from: AztecAddress,
   escrow: AmazonEscrowContract,
@@ -166,22 +168,24 @@ export async function depositToEscrow(
     amount,
   );
   const { receipt } = await escrowWithWallet.methods
-    .deposit_tokens(nonce)
+    .open_order(nonce)
     .with({ authWitnesses: [authwit] })
     .send(opts.send);
   return receipt.txHash;
 }
 
 /**
- * Inputs to the escrow's `fill_order` private function. Mirrors the Noir
- * verify(...) argset 1:1 - same shape the circuit takes.
+ * Inputs to the escrow's verify-bearing private functions
+ * (`enter_settlement_in_progress` and `settle_order`). Mirrors the Noir
+ * verify(...) argset 1:1 plus the `expectedStatus` literal that selects
+ * which shipment-status needle the circuit should match.
  *
  * BoundedVec args are passed as `{ storage, len }` from
  * @amazon-zktls/circuit's parseAttestationToInputs; we forward the raw
  * storage array since aztec.js encodes BoundedVec<u8, N> as a flat byte
- * array.
+ * array sliced to the real length.
  */
-export type FillOrderArgs = {
+export type VerifyOrderArgs = {
   publicKeyX: number[]; // 32
   publicKeyY: number[]; // 32
   hash: number[]; // 32
@@ -190,6 +194,7 @@ export type FillOrderArgs = {
   requestUrl: { storage: number[]; len: number };
   recipient: number[]; // 20
   timestamp: bigint | number;
+  expectedStatus: { storage: number[]; len: number };
   hashes: {
     shipment_status: number[]; // 32
     product_title: number[]; // 32
@@ -209,48 +214,102 @@ export type FillOrderArgs = {
   grandTotalLen: number;
 };
 
+const sliceBV = (bv: { storage: number[]; len: number }) =>
+  bv.storage.slice(0, bv.len);
+
+const buildVerifyArgs = (args: VerifyOrderArgs) =>
+  [
+    args.publicKeyX,
+    args.publicKeyY,
+    args.hash,
+    args.signature,
+    sliceBV(args.allowedUrl),
+    sliceBV(args.requestUrl),
+    args.recipient,
+    args.timestamp,
+    sliceBV(args.expectedStatus),
+    args.hashes,
+    {
+      shipment_status: sliceBV(args.contents.shipment_status),
+      product_title: sliceBV(args.contents.product_title),
+      ship_to: sliceBV(args.contents.ship_to),
+      grand_total: sliceBV(args.contents.grand_total),
+    },
+    args.shipToHints,
+    args.grandTotalLen,
+  ] as const;
+
 /**
- * Filler claims the bounty by submitting a Primus zkTLS attestation. The
- * Noir contract re-runs `amazon_zktls_lib::verify(...)` inline and asserts
- * outputs.{asin,address_commitment} match the order config. The contract
- * pays itself out, so no authwit is needed on the caller side.
+ * Stage transition: OPEN -> SETTLEMENT_IN_PROGRESS.
+ *
+ * Buyer submits an "Arriving …" attestation. The contract verifies it
+ * inline, records the SIP entry timestamp in a TimerNote, and pushes
+ * the SIP-stage nullifier. No funds move at this stage.
+ *
+ * Caller MUST pass `expectedStatusBytes('arriving')` (from
+ * @amazon-zktls/circuit) as `args.expectedStatus`.
  */
-export async function fillOrder(
+export async function enterSettlementInProgress(
   wallet: Wallet,
   from: AztecAddress,
   escrow: AmazonEscrowContract,
-  args: FillOrderArgs,
+  args: VerifyOrderArgs,
   opts: { send: SendInteractionOptions<InteractionWaitOptions> } = {
     send: { from, additionalScopes: [escrow.address] },
   },
 ): Promise<TxHash> {
   const escrowWithWallet = escrow.withWallet(wallet);
-  // For BoundedVec<u8, N> args, aztec.js takes a JS array of actual length
-  // and pads to N internally; passing the pre-padded storage would set
-  // BoundedVec.len = N which breaks length-aware logic (URL prefix check,
-  // sha256_var, etc). Slice to the real `len`.
-  const slice = (bv: { storage: number[]; len: number }) =>
-    bv.storage.slice(0, bv.len);
   const { receipt } = await escrowWithWallet.methods
-    .fill_order(
-      args.publicKeyX,
-      args.publicKeyY,
-      args.hash,
-      args.signature,
-      slice(args.allowedUrl),
-      slice(args.requestUrl),
-      args.recipient,
-      args.timestamp,
-      args.hashes,
-      {
-        shipment_status: slice(args.contents.shipment_status),
-        product_title: slice(args.contents.product_title),
-        ship_to: slice(args.contents.ship_to),
-        grand_total: slice(args.contents.grand_total),
-      },
-      args.shipToHints,
-      args.grandTotalLen,
-    )
+    .enter_settlement_in_progress(...buildVerifyArgs(args))
+    .send(opts.send);
+  return receipt.txHash;
+}
+
+/**
+ * Stage transition: OPEN -> SETTLED, or SIP -> SETTLED.
+ *
+ * Buyer submits a "Delivered" attestation and claims the bounty. The
+ * contract pays itself out to the caller, so no authwit is needed on
+ * the caller side.
+ *
+ * Caller MUST pass `expectedStatusBytes('delivered')` as
+ * `args.expectedStatus`.
+ */
+export async function settleOrder(
+  wallet: Wallet,
+  from: AztecAddress,
+  escrow: AmazonEscrowContract,
+  args: VerifyOrderArgs,
+  opts: { send: SendInteractionOptions<InteractionWaitOptions> } = {
+    send: { from, additionalScopes: [escrow.address] },
+  },
+): Promise<TxHash> {
+  const escrowWithWallet = escrow.withWallet(wallet);
+  const { receipt } = await escrowWithWallet.methods
+    .settle_order(...buildVerifyArgs(args))
+    .send(opts.send);
+  return receipt.txHash;
+}
+
+/**
+ * Stage transition: OPEN -> VOID, or SIP -> VOID (after timer).
+ *
+ * Order creator (config.owner) claws back the bounty. `afterSip=false`
+ * is the immediate path (only valid if SIP has not fired);
+ * `afterSip=true` is the timer path (valid >=10 days after SIP).
+ */
+export async function voidOrder(
+  wallet: Wallet,
+  from: AztecAddress,
+  escrow: AmazonEscrowContract,
+  afterSip: boolean,
+  opts: { send: SendInteractionOptions<InteractionWaitOptions> } = {
+    send: { from, additionalScopes: [escrow.address] },
+  },
+): Promise<TxHash> {
+  const escrowWithWallet = escrow.withWallet(wallet);
+  const { receipt } = await escrowWithWallet.methods
+    .void_order(afterSip)
     .send(opts.send);
   return receipt.txHash;
 }

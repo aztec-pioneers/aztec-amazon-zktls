@@ -12,8 +12,11 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   CIRCUIT_DIMS,
+  EXPECTED_STATUS,
   FIELD_MAP,
+  expectedStatusBytes,
   type CircuitInputs,
+  type ExpectedStatusKind,
   type FieldKey,
   type PrimusAttestation,
 } from "./types.js";
@@ -142,6 +145,10 @@ export interface ParseOptions {
   // Optional override: skip sha256 self-check (useful if you want the
   // circuit itself to be the integrity oracle).
   skipSha256Check?: boolean;
+  // Which status needle the circuit should match. Defaults to
+  // 'delivered' so existing callers (and the standalone bin) keep
+  // working without changes; SIP callers pass 'arriving'.
+  expectedStatus?: ExpectedStatusKind;
 }
 
 export function parseAttestation(
@@ -254,6 +261,22 @@ export function parseAttestation(
     );
   }
 
+  // 9. Status needle. Default to 'delivered' so the bin circuit keeps
+  //    behaving identically to the previous hardcoded matcher. Sanity:
+  //    the chosen needle MUST appear in the supplied plaintext, otherwise
+  //    the circuit will fail and the test runner buries the cause.
+  const statusKind: ExpectedStatusKind = opts.expectedStatus ?? "delivered";
+  const expected_status = expectedStatusBytes(statusKind);
+  if (!opts.skipSha256Check) {
+    const literal = EXPECTED_STATUS[statusKind];
+    const haystack = plaintexts[FIELD_MAP.shipment_status] ?? "";
+    if (!haystack.includes(literal)) {
+      throw new Error(
+        `expectedStatus='${statusKind}' but '${literal}' not found in shipmentStatus plaintext`,
+      );
+    }
+  }
+
   return {
     public_key_x: Array.from(pubX),
     public_key_y: Array.from(pubY),
@@ -263,6 +286,7 @@ export function parseAttestation(
     request_url,
     recipient: Array.from(recipientBytes),
     timestamp: String(att.timestamp),
+    expected_status,
     hashes: hashesByField,
     contents: contentsByField,
     ship_to_hints,

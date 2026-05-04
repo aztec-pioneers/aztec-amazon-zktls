@@ -13,8 +13,11 @@
 //   4. ASIN extraction from productTitle.
 //   5. Grand total parsing from grandTotal (USD cents).
 //   6. shipTo split into 4 logical lines + poseidon2 commitment.
-//   7. shipmentStatus contains "Delivered".
+//   7. shipmentStatus contains the caller-supplied needle
+//      (e.g. ">Delivered " for SETTLED, ">Arriving " for SIP).
 //   8. Nullifier = poseidon2(pack(signature)).
+//   9. Shipment date is exposed as a public output, currently
+//      hardcoded to 0 (real extraction is a follow-up).
 //
 // TODO(soundness): public inputs (recipient, timestamp, hashes, attestor
 // pubkey) are not bound to `hash` inside the circuit. Verifier must set
@@ -57,6 +60,10 @@ pub global MAX_COUNTRY_LEN: u32 = 32;
 // hint's ceiling, not a constraint.
 pub global MAX_GRAND_TOTAL_DIGITS: u32 = 13;
 
+// Re-export for convenience so downstream callers can import the
+// needle ceiling alongside the rest of the size constants.
+pub use status::MAX_STATUS_NEEDLE_LEN;
+
 pub struct Contents {
     pub shipment_status: BoundedVec<u8, MAX_SHIPMENT_STATUS_LEN>,
     pub product_title: BoundedVec<u8, MAX_PRODUCT_TITLE_LEN>,
@@ -86,6 +93,7 @@ pub struct PublicOutputs {
     pub grand_total: Field,         // cents, e.g. $1,234.56 -> 123456
     pub address_commitment: Field,  // poseidon2 over packed name|street|csz|country
     pub nullifier: Field,           // poseidon2(pack(signature))
+    pub shipment_date: Field,       // mocked to 0; real extraction is a v2 follow-up
 }
 
 // Single high-level entrypoint. `bin/main.nr::main` and downstream Aztec
@@ -99,6 +107,7 @@ pub fn verify(
     request_url: BoundedVec<u8, MAX_URL_LEN>,
     recipient: [u8; 20],
     timestamp: u64,
+    expected_status: BoundedVec<u8, MAX_STATUS_NEEDLE_LEN>,
     hashes: Hashes,
     contents: Contents,
     ship_to_hints: ShipToHints,
@@ -154,8 +163,8 @@ pub fn verify(
     // (6) shipTo address commitment.
     let address_commitment = ship_to::extract_commitment(contents.ship_to, ship_to_hints);
 
-    // (7) shipmentStatus contains "Delivered".
-    status::assert_delivered(contents.shipment_status);
+    // (7) shipmentStatus contains the caller-supplied needle.
+    status::assert_status_contains(expected_status, contents.shipment_status);
 
     // (8) Nullifier.
     let nullifier = nullifier::compute(signature);
@@ -166,5 +175,11 @@ pub fn verify(
     let _ = recipient;
     let _ = timestamp;
 
-    PublicOutputs { asin, grand_total, address_commitment, nullifier }
+    PublicOutputs {
+        asin,
+        grand_total,
+        address_commitment,
+        nullifier,
+        shipment_date: 0,
+    }
 }

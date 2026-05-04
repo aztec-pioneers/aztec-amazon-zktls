@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-import { createAztecNodeClient } from "@aztec/aztec.js/node";
+import { createAztecNodeClient, type AztecNode } from "@aztec/aztec.js/node";
 import { Fr } from "@aztec/aztec.js/fields";
 import { getInitialTestAccountsData } from "@aztec/accounts/testing";
 import { EmbeddedWallet } from "@aztec/wallets/embedded";
@@ -12,9 +12,11 @@ import { AztecAddress } from "@aztec/aztec.js/addresses";
 import {
   CIRCUIT_DIMS,
   computeAddressCommitment,
+  expectedStatusBytes,
   packBytesNodash,
   parseAttestation,
   poseidon2Hash,
+  type CircuitInputs,
   type PrimusAttestation,
 } from "@amazon-zktls/circuit";
 
@@ -25,12 +27,15 @@ import {
   deployEscrowContract,
   deployOracleContract,
   deployTokenContract,
-  depositToEscrow,
-  fillOrder,
+  enterSettlementInProgress,
   getEscrowContract,
   getOracleContract,
   getTokenContract,
+  openOrder,
+  settleOrder,
+  voidOrder,
   wad,
+  type VerifyOrderArgs,
 } from "../src/index.js";
 
 const L2_NODE_URL = process.env.L2_NODE_URL ?? "http://localhost:8080";
@@ -46,7 +51,7 @@ const FIXTURE_PATH = resolve(
 
 // Recompute the (asin, address_commitment, attestor_pubkey_hash) Field
 // values that `verify(...)` will produce on this fixture, so the order's
-// stored config matches what the proof asserts on fill.
+// stored config matches what the proof asserts on settle.
 async function deriveOrderFields(att: PrimusAttestation) {
   const plaintexts = att._plaintexts;
   if (!plaintexts) {
@@ -55,7 +60,6 @@ async function deriveOrderFields(att: PrimusAttestation) {
     );
   }
 
-  // ASIN: 10 ASCII bytes after `/dp/` in productTitle, packed LE into one Field.
   const productTitle = plaintexts.productTitle;
   const dpIdx = productTitle.indexOf("/dp/");
   if (dpIdx === -1) throw new Error("/dp/ not found in productTitle");
@@ -64,8 +68,6 @@ async function deriveOrderFields(att: PrimusAttestation) {
   const asinBytes = new TextEncoder().encode(asinStr);
   const asin = packBytesNodash(asinBytes, 10)[0];
 
-  // Address commitment: extract the 4 trimmed shipTo lines, recompute via
-  // the same poseidon2-of-packed-fields recipe the circuit uses.
   const shipTo = plaintexts.shipTo;
   const LI_OPEN = 'class="a-list-item">\n                ';
   const LI_CLOSE = "\n            </span></li>";
@@ -90,7 +92,6 @@ async function deriveOrderFields(att: PrimusAttestation) {
       `shipTo template mismatch: ${opens.length} opens, ${closes.length} closes`,
     );
   }
-  // <br> sits inside the second <li>, between street and city_state_zip.
   let br = -1;
   for (let i = opens[1]; i < closes[1]; ) {
     const f = shipTo.indexOf(BR, i);
@@ -112,8 +113,6 @@ async function deriveOrderFields(att: PrimusAttestation) {
     country,
   });
 
-  // Attestor pubkey hash: poseidon2(pack_bytes(public_key_x ‖ public_key_y, 64))
-  // - same recipe the contract derives inline.
   const inputs = parseAttestation(att, plaintexts);
   const pubkeyBytes = new Uint8Array(64);
   pubkeyBytes.set(inputs.public_key_x, 0);
@@ -123,142 +122,292 @@ async function deriveOrderFields(att: PrimusAttestation) {
   return { asin, addressCommitment, pubkeyHash, inputs };
 }
 
-describe("AmazonEscrow happy path", () => {
-  // Account 1: minter + order creator. Account 2: filler.
-  // Two TestWallets, each with its own PXE state - the OTC pubkey pattern
-  // requires registerContract on every wallet that reads the escrow's notes.
-  let wallet1: EmbeddedWallet;
-  let wallet2: EmbeddedWallet;
-  let account1Address: AztecAddress;
-  let account2Address: AztecAddress;
+// Build VerifyOrderArgs for the contract from parsed CircuitInputs +
+// the chosen status needle. Both settle_order and
+// enter_settlement_in_progress consume this exact shape.
+function buildVerifyArgs(
+  inputs: CircuitInputs,
+  kind: "delivered" | "arriving",
+): VerifyOrderArgs {
+  return {
+    publicKeyX: inputs.public_key_x,
+    publicKeyY: inputs.public_key_y,
+    hash: inputs.hash,
+    signature: inputs.signature,
+    allowedUrl: inputs.allowed_url,
+    requestUrl: inputs.request_url,
+    recipient: inputs.recipient,
+    timestamp: BigInt(inputs.timestamp),
+    expectedStatus: expectedStatusBytes(kind),
+    hashes: inputs.hashes,
+    contents: inputs.contents,
+    shipToHints: inputs.ship_to_hints,
+    grandTotalLen: inputs.grand_total_len,
+  };
+}
 
-  let usdcAddress: AztecAddress;
-  let oracleAddress: AztecAddress;
-  let escrow: Awaited<ReturnType<typeof deployEscrowContract>>;
-  let circuitInputs: Awaited<ReturnType<typeof deriveOrderFields>>["inputs"];
+interface Setup {
+  node: AztecNode;
+  wallet1: EmbeddedWallet;
+  wallet2: EmbeddedWallet;
+  account1Address: AztecAddress;
+  account2Address: AztecAddress;
+  usdcAddress: AztecAddress;
+  oracleAddress: AztecAddress;
+  escrow: Awaited<ReturnType<typeof deployEscrowContract>>;
+  circuitInputs: CircuitInputs;
+}
+
+// Spin up two wallets, fresh USDC + oracle + escrow contracts, mint
+// the bounty into wallet1, and register the escrow on both wallets.
+// Each describe block calls this once in beforeAll so its tests share
+// the same escrow instance (which is terminal-once anyway).
+async function setupFixture(label: string): Promise<Setup> {
+  const fixture = JSON.parse(
+    readFileSync(FIXTURE_PATH, "utf-8"),
+  ) as PrimusAttestation;
+  const derived = await deriveOrderFields(fixture);
+
+  const node = createAztecNodeClient(L2_NODE_URL);
+  const wallet1 = await EmbeddedWallet.create(node, { ephemeral: true });
+  const wallet2 = await EmbeddedWallet.create(node, { ephemeral: true });
+
+  const initial = await getInitialTestAccountsData();
+  if (!initial[0] || !initial[1]) {
+    throw new Error("need at least 2 prefunded accounts on the localnet");
+  }
+  const a1 = await wallet1.createSchnorrAccount(
+    initial[0].secret,
+    initial[0].salt,
+    initial[0].signingKey,
+  );
+  const a2 = await wallet2.createSchnorrAccount(
+    initial[1].secret,
+    initial[1].salt,
+    initial[1].signingKey,
+  );
+  const account1Address = a1.address;
+  const account2Address = a2.address;
+  await wallet1.registerSender(account2Address, `${label}-filler`);
+  await wallet2.registerSender(account1Address, `${label}-creator`);
+
+  const usdc = await deployTokenContract(
+    wallet1,
+    account1Address,
+    TOKEN_METADATA.usdc,
+  );
+  const usdcAddress = usdc.contract.address;
+  await usdc.contract
+    .withWallet(wallet1)
+    .methods.mint_to_private(account1Address, ORDER_AMOUNT)
+    .send({ from: account1Address });
+  await getTokenContract(wallet2, node, usdcAddress);
+
+  const oracle = await deployOracleContract(
+    wallet1,
+    account1Address,
+    account1Address,
+  );
+  const oracleAddress = oracle.contract.address;
+  await addOracleKey(wallet1, account1Address, oracle.contract, derived.pubkeyHash);
+  await getOracleContract(wallet2, node, oracleAddress);
+
+  const escrow = await deployEscrowContract(
+    wallet1,
+    account1Address,
+    usdcAddress,
+    ORDER_AMOUNT,
+    derived.asin,
+    derived.addressCommitment,
+    oracleAddress,
+  );
+  await getEscrowContract(
+    wallet2,
+    escrow.contract.address,
+    escrow.instance,
+    escrow.secretKey,
+  );
+  await wallet1.registerSender(escrow.contract.address, `${label}-escrow`);
+  await wallet2.registerSender(escrow.contract.address, `${label}-escrow`);
+
+  return {
+    node,
+    wallet1,
+    wallet2,
+    account1Address,
+    account2Address,
+    usdcAddress,
+    oracleAddress,
+    escrow,
+    circuitInputs: derived.inputs,
+  };
+}
+
+describe("AmazonEscrow: OPEN -> SETTLED shortcut (delivered proof, no SIP)", () => {
+  let s: Setup;
 
   beforeAll(async () => {
-    const fixture = JSON.parse(
-      readFileSync(FIXTURE_PATH, "utf-8"),
-    ) as PrimusAttestation;
-
-    const derived = await deriveOrderFields(fixture);
-    circuitInputs = derived.inputs;
-
-    const node = createAztecNodeClient(L2_NODE_URL);
-
-    wallet1 = await EmbeddedWallet.create(node, { ephemeral: true });
-    wallet2 = await EmbeddedWallet.create(node, { ephemeral: true });
-
-    const initial = await getInitialTestAccountsData();
-    if (!initial[0] || !initial[1]) {
-      throw new Error("need at least 2 prefunded accounts on the localnet");
-    }
-    const a1 = await wallet1.createSchnorrAccount(
-      initial[0].secret,
-      initial[0].salt,
-      initial[0].signingKey,
-    );
-    const a2 = await wallet2.createSchnorrAccount(
-      initial[1].secret,
-      initial[1].salt,
-      initial[1].signingKey,
-    );
-    account1Address = a1.address;
-    account2Address = a2.address;
-    await wallet1.registerSender(account2Address, "filler");
-    await wallet2.registerSender(account1Address, "creator");
-
-    // USDC.
-    const usdc = await deployTokenContract(
-      wallet1,
-      account1Address,
-      TOKEN_METADATA.usdc,
-    );
-    usdcAddress = usdc.contract.address;
-    await usdc.contract
-      .withWallet(wallet1)
-      .methods.mint_to_private(account1Address, ORDER_AMOUNT)
-      .send({ from: account1Address });
-    await getTokenContract(wallet2, node, usdcAddress);
-
-    // Oracle. Register the fixture's attestor pubkey hash so fill_order
-    // doesn't revert with "uninitialized PublicImmutable".
-    const oracle = await deployOracleContract(
-      wallet1,
-      account1Address,
-      account1Address,
-    );
-    oracleAddress = oracle.contract.address;
-    await addOracleKey(
-      wallet1,
-      account1Address,
-      oracle.contract,
-      derived.pubkeyHash,
-    );
-    await getOracleContract(wallet2, node, oracleAddress);
-
-    // Escrow. asin/address_commitment match what verify(...) will compute.
-    escrow = await deployEscrowContract(
-      wallet1,
-      account1Address,
-      usdcAddress,
-      ORDER_AMOUNT,
-      derived.asin,
-      derived.addressCommitment,
-      oracleAddress,
-    );
-
-    // Filler's wallet needs the escrow's secret key to read the config note.
-    await getEscrowContract(
-      wallet2,
-      escrow.contract.address,
-      escrow.instance,
-      escrow.secretKey,
-    );
-    await wallet1.registerSender(escrow.contract.address, "escrow");
-    await wallet2.registerSender(escrow.contract.address, "escrow");
+    s = await setupFixture("settle-shortcut");
   }, 10 * 60 * 1000);
 
-  it("creator deposits, filler proves and claims the bounty", async () => {
-    const node = createAztecNodeClient(L2_NODE_URL);
-    const usdcOnW1 = await getTokenContract(wallet1, node, usdcAddress);
-    const usdcOnW2 = await getTokenContract(wallet2, node, usdcAddress);
+  it("creator opens, filler proves delivered and claims the bounty", async () => {
+    const usdcOnW1 = await getTokenContract(s.wallet1, s.node, s.usdcAddress);
+    const usdcOnW2 = await getTokenContract(s.wallet2, s.node, s.usdcAddress);
 
-    expect(await balanceOfPrivate(wallet1, account1Address, usdcOnW1)).toBe(
+    expect(await balanceOfPrivate(s.wallet1, s.account1Address, usdcOnW1)).toBe(
       ORDER_AMOUNT,
     );
-    expect(await balanceOfPrivate(wallet2, account2Address, usdcOnW2)).toBe(0n);
+    expect(await balanceOfPrivate(s.wallet2, s.account2Address, usdcOnW2)).toBe(0n);
 
-    // Creator deposits the bounty.
-    await depositToEscrow(
-      wallet1,
-      account1Address,
-      escrow.contract,
+    await openOrder(
+      s.wallet1,
+      s.account1Address,
+      s.escrow.contract,
       usdcOnW1,
       ORDER_AMOUNT,
     );
-    expect(await balanceOfPrivate(wallet1, account1Address, usdcOnW1)).toBe(0n);
+    expect(await balanceOfPrivate(s.wallet1, s.account1Address, usdcOnW1)).toBe(0n);
 
-    // Filler runs the verifier and claims. Note circuitInputs.timestamp is a
-    // decimal string from parseAttestation; aztec.js wants bigint for u64.
-    await fillOrder(wallet2, account2Address, escrow.contract, {
-      publicKeyX: circuitInputs.public_key_x,
-      publicKeyY: circuitInputs.public_key_y,
-      hash: circuitInputs.hash,
-      signature: circuitInputs.signature,
-      allowedUrl: circuitInputs.allowed_url,
-      requestUrl: circuitInputs.request_url,
-      recipient: circuitInputs.recipient,
-      timestamp: BigInt(circuitInputs.timestamp),
-      hashes: circuitInputs.hashes,
-      contents: circuitInputs.contents,
-      shipToHints: circuitInputs.ship_to_hints,
-      grandTotalLen: circuitInputs.grand_total_len,
-    });
+    await settleOrder(
+      s.wallet2,
+      s.account2Address,
+      s.escrow.contract,
+      buildVerifyArgs(s.circuitInputs, "delivered"),
+    );
 
-    expect(await balanceOfPrivate(wallet2, account2Address, usdcOnW2)).toBe(
+    expect(await balanceOfPrivate(s.wallet2, s.account2Address, usdcOnW2)).toBe(
       ORDER_AMOUNT,
     );
+  });
+
+  it("a second settle on the same escrow fails (push nullifier mutex)", async () => {
+    await expect(
+      settleOrder(
+        s.wallet2,
+        s.account2Address,
+        s.escrow.contract,
+        buildVerifyArgs(s.circuitInputs, "delivered"),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("voiding a settled escrow fails (push nullifier mutex)", async () => {
+    await expect(
+      voidOrder(s.wallet1, s.account1Address, s.escrow.contract, false),
+    ).rejects.toThrow();
+  });
+});
+
+describe("AmazonEscrow: OPEN -> VOID immediate (no SIP)", () => {
+  let s: Setup;
+
+  beforeAll(async () => {
+    s = await setupFixture("void-immediate");
+  }, 10 * 60 * 1000);
+
+  it("non-owner cannot void", async () => {
+    const usdcOnW1 = await getTokenContract(s.wallet1, s.node, s.usdcAddress);
+    await openOrder(
+      s.wallet1,
+      s.account1Address,
+      s.escrow.contract,
+      usdcOnW1,
+      ORDER_AMOUNT,
+    );
+    await expect(
+      voidOrder(s.wallet2, s.account2Address, s.escrow.contract, false),
+    ).rejects.toThrow();
+  });
+
+  it("owner voids (immediate path) and recovers the bounty", async () => {
+    const usdcOnW1 = await getTokenContract(s.wallet1, s.node, s.usdcAddress);
+    expect(await balanceOfPrivate(s.wallet1, s.account1Address, usdcOnW1)).toBe(0n);
+
+    await voidOrder(s.wallet1, s.account1Address, s.escrow.contract, false);
+
+    expect(await balanceOfPrivate(s.wallet1, s.account1Address, usdcOnW1)).toBe(
+      ORDER_AMOUNT,
+    );
+  });
+
+  it("settling a voided escrow fails (push nullifier mutex)", async () => {
+    await expect(
+      settleOrder(
+        s.wallet2,
+        s.account2Address,
+        s.escrow.contract,
+        buildVerifyArgs(s.circuitInputs, "delivered"),
+      ),
+    ).rejects.toThrow();
+  });
+});
+
+describe("AmazonEscrow: failure - settle without open", () => {
+  let s: Setup;
+
+  beforeAll(async () => {
+    s = await setupFixture("no-open-settle");
+  }, 10 * 60 * 1000);
+
+  it("settling a never-opened escrow fails (OPEN nullifier check)", async () => {
+    await expect(
+      settleOrder(
+        s.wallet2,
+        s.account2Address,
+        s.escrow.contract,
+        buildVerifyArgs(s.circuitInputs, "delivered"),
+      ),
+    ).rejects.toThrow();
+  });
+});
+
+// SIP-requiring paths need an "Arriving …" attestation signed by the
+// Primus attestor. We don't have an arriving fixture in-repo today
+// (only the delivered one). When one lands, drop `.skip` and the
+// `enterSettlementInProgress` calls will exercise the full state
+// machine including the timer-void path. The contract-side state
+// machine logic is otherwise identical for the delivered-proof
+// branches that we DO test above (same nullifier-mutex pattern).
+describe.skip("AmazonEscrow: SIP-required paths (need arriving fixture)", () => {
+  let s: Setup;
+  beforeAll(async () => {
+    s = await setupFixture("sip-paths");
+  }, 10 * 60 * 1000);
+
+  it("OPEN -> SIP -> SETTLED happy path", async () => {
+    const usdcOnW1 = await getTokenContract(s.wallet1, s.node, s.usdcAddress);
+    await openOrder(
+      s.wallet1,
+      s.account1Address,
+      s.escrow.contract,
+      usdcOnW1,
+      ORDER_AMOUNT,
+    );
+    await enterSettlementInProgress(
+      s.wallet2,
+      s.account2Address,
+      s.escrow.contract,
+      buildVerifyArgs(s.circuitInputs, "arriving"),
+    );
+    await settleOrder(
+      s.wallet2,
+      s.account2Address,
+      s.escrow.contract,
+      buildVerifyArgs(s.circuitInputs, "delivered"),
+    );
+  });
+
+  it("OPEN -> SIP -> VOID(immediate) fails (SIP nullifier mutex)", async () => {
+    // After SIP fires, voiding via the immediate path must fail
+    // because void(after_sip=false) tries to push the SIP-stage
+    // nullifier as its lockout, which collides with SIP's own emission.
+    await expect(
+      voidOrder(s.wallet1, s.account1Address, s.escrow.contract, false),
+    ).rejects.toThrow();
+  });
+
+  it("OPEN -> SIP -> VOID(timer) fails before 10 days elapsed", async () => {
+    // Needs Aztec test-env time advancement; localnet doesn't expose
+    // a cheat by default. v2: use the TestEnvironment time-skip API.
   });
 });

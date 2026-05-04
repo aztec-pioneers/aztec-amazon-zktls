@@ -12,15 +12,20 @@ zkTLS attestation that the item was actually delivered to the order creator's ad
    visits the [frontend](packages/frontend/) to attest the order summary page via
    Primus zkTLS. The browser runs the Noir circuit in-process and produces a proof whose
    public outputs are `(asin, grand_total, address_commitment, nullifier)`.
-3. **Filler claims** by calling `fill_order` on the escrow. The contract re-runs the
-   verifier inline (same Noir lib the browser used), asserts `asin` and
-   `address_commitment` match the order, gates on an admin-curated attestor pubkey
-   registry, pushes both the proof nullifier and the order's fill nullifier, and pays
-   the filler.
+3. **Filler claims** by calling `settle_order` on the escrow with a `>Delivered `
+   attestation, or first calls `enter_settlement_in_progress` with an `>Arriving `
+   attestation to flag mid-flight progress and start a 10-day clawback timer. The
+   contract re-runs the verifier inline (same Noir lib the browser used), asserts
+   `asin` and `address_commitment` match the order, gates on an admin-curated
+   attestor pubkey registry, pushes the per-stage nullifiers, and pays the filler.
+4. **Order creator** can call `void_order` to claw back funds — immediately if no
+   buyer has entered SIP, or after a 10-day window if SIP fired but never settled.
 
 The chain stores nothing about the buyer's identity, the shipping address, or the order
 contents — only commitments. Replay across orders is blocked by the proof nullifier;
-double-fill of a single order by the config nullifier.
+state-machine progression is enforced by per-stage nullifiers
+(`Poseidon2(serialize(config) || [stage])`) plus a kernel-checked
+`assert_nullifier_exists` for prior-stage gating.
 
 ## Layout
 

@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import path from "node:path";
 
 const nextConfig: NextConfig = {
   // Pin Turbopack's project root to this package directory. In a pnpm
@@ -15,7 +16,7 @@ const nextConfig: NextConfig = {
   turbopack: {
     // Resolve to an absolute path explicitly; relative segments leak
     // through into Turbopack's error messages without being normalized.
-    root: require("node:path").resolve(process.cwd(), "..", ".."),
+    root: path.resolve(process.cwd(), "..", ".."),
   },
 
   // network-core-sdk loads native algorithm bindings via require() and bundles

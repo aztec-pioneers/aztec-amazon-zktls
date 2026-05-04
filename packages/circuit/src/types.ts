@@ -49,6 +49,9 @@ export interface CircuitInputs {
   recipient: number[]; // 20
   // Noir u64; noir_js accepts decimal strings here.
   timestamp: string;
+  // BoundedVec<u8, MAX_STATUS_NEEDLE_LEN>: literal needle the circuit
+  // must find inside shipmentStatus (e.g. ">Delivered " or ">Arriving ").
+  expected_status: { storage: number[]; len: number };
   hashes: {
     shipment_status: number[]; // 32
     product_title: number[]; // 32
@@ -85,7 +88,33 @@ export const CIRCUIT_DIMS = {
   // Cap on the number of bytes between `>$` and `<` in grandTotal
   // (digits + thousands-commas + decimal period).
   MAX_GRAND_TOTAL_DIGITS: 13,
+  // Max bytes in the shipment-status needle (">Delivered ",
+  // ">Arriving ", future variants). Must stay <= 32 to fit SubString32.
+  MAX_STATUS_NEEDLE_LEN: 16,
 } as const;
+
+// Canonical status needles: byte-identical to the strings the Noir
+// circuit substring-matches against. Pass via `expectedStatusBytes`.
+export const EXPECTED_STATUS = {
+  delivered: ">Delivered ",
+  arriving: ">Arriving ",
+} as const;
+export type ExpectedStatusKind = keyof typeof EXPECTED_STATUS;
+
+export function expectedStatusBytes(
+  kind: ExpectedStatusKind,
+): { storage: number[]; len: number } {
+  const literal = EXPECTED_STATUS[kind];
+  const bytes = new TextEncoder().encode(literal);
+  if (bytes.length > CIRCUIT_DIMS.MAX_STATUS_NEEDLE_LEN) {
+    throw new Error(
+      `expected_status '${literal}' is ${bytes.length} bytes, exceeds MAX=${CIRCUIT_DIMS.MAX_STATUS_NEEDLE_LEN}`,
+    );
+  }
+  const storage = new Array<number>(CIRCUIT_DIMS.MAX_STATUS_NEEDLE_LEN).fill(0);
+  for (let i = 0; i < bytes.length; i++) storage[i] = bytes[i];
+  return { storage, len: bytes.length };
+}
 
 // Field names (Noir snake_case) mapped to the Primus SDK's camelCase keyName
 // from the template. Handy when walking `attestation.data` / `_plaintexts`.

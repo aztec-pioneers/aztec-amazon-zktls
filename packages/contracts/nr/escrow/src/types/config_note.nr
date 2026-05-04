@@ -41,9 +41,14 @@ impl ConfigNote {
         }
     }
 
-    pub fn get_nullifier(self, deposit: bool) -> Field {
+    // Returns the per-stage nullifier for this config. Each stage
+    // (OPEN, SETTLEMENT_IN_PROGRESS, SETTLED, VOID) gets its own unique
+    // nullifier, derived by binding the stage code to the serialized
+    // config. The contract pushes these to mark stage transitions and
+    // checks `assert_nullifier_exists` to gate prior stages.
+    pub fn get_nullifier(self, stage: u8) -> Field {
         let serialized = self.serialize();
-        let preimage = serialized.concat([deposit as Field]);
+        let preimage = serialized.concat([stage as Field]);
         Poseidon2::hash(preimage, 8)
     }
 }

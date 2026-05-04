@@ -42,7 +42,6 @@ export function ProveAttestation({
 
   const log = useCallback((msg: string) => {
     setLogs((l) => [...l, msg]);
-    // eslint-disable-next-line no-console
     console.log("[prove]", msg);
   }, []);
 

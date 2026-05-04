@@ -2,12 +2,23 @@
 
 Aztec contracts that consume the `@amazon-zktls/circuit` zkTLS verifier:
 
-- **`AmazonEscrow`** - per-order private escrow. Order creator deposits a USDC bounty
-  bound to a specific `(asin, address_commitment)`. A filler claims the bounty by
-  submitting a Primus zkTLS attestation; the contract re-runs `amazon_zktls_lib::verify`
-  inline and pays the filler if outputs match.
+- **`AmazonEscrow`** - per-order private escrow. Four-stage state machine:
+  - **OPEN** (`open_order`): creator deposits a USDC bounty bound to a specific
+    `(asin, address_commitment)`.
+  - **SETTLEMENT_IN_PROGRESS** (`enter_settlement_in_progress`): buyer submits
+    a Primus zkTLS attestation showing `>Arriving `; records SIP timestamp,
+    starts the 10-day clawback timer.
+  - **SETTLED** (`settle_order`): buyer submits a `>Delivered ` attestation
+    and is paid out. Reachable from OPEN (shortcut) or SIP.
+  - **VOID** (`void_order(after_sip)`): only `config.owner` can call.
+    `after_sip=false` claws back immediately if SIP never fired;
+    `after_sip=true` claws back >=10 days after SIP.
+  Stage gating uses per-stage nullifiers (`Poseidon2(serialize(config) || [stage])`)
+  with the kernel's `assert_nullifier_exists` for prior-stage existence and an
+  emit-as-mutex pattern for terminal-state exclusivity.
 - **`AttestorKeyOracle`** - admin-curated registry of allowed attestor pubkey hashes.
-  Read privately from the escrow's `fill_order`; reading an unregistered key reverts.
+  Read privately from the escrow's verify-bearing entrypoints; reading an
+  unregistered key reverts.
 
 Pinned to Aztec **v4.2.0-aztecnr-rc.2** (matching aztec-standards tag).
 
@@ -23,8 +34,8 @@ packages/contracts/
 ├── scripts/add_artifacts.ts      # post-codegen: copy JSON, fix imports
 ├── src/
 │   ├── artifacts/{escrow,oracle,token}/   # generated, gitignored
-│   ├── contract.ts               # deploy/deposit/fill TS helpers
-│   └── constants.ts              # TOKEN_METADATA, EscrowConfig
+│   ├── contract.ts               # deploy/open/settle/SIP/void TS helpers
+│   └── constants.ts              # TOKEN_METADATA, EscrowConfig, EscrowStage
 └── test/escrow.test.ts           # vitest happy-path against localnet
 ```
 
@@ -66,9 +77,16 @@ Test setup:
 4. Deploys USDC, mints to account 1.
 5. Deploys the oracle, registers the fixture's pubkey hash.
 6. Deploys a fresh escrow with the order params, registers it on wallet 2.
-7. Account 1 deposits the bounty.
-8. Account 2 calls `fill_order(...)` with the full circuit input set.
+7. Account 1 calls `open_order(...)` to deposit the bounty.
+8. Account 2 calls `settle_order(...)` with `expectedStatus = '>Delivered '`
+   (the `OPEN -> SETTLED` shortcut).
 9. Asserts account 2 received the bounty.
+
+Other paths (`open_order` -> `void_order(false)` immediate clawback, mutex
+failure cases, etc.) are exercised by additional `describe` blocks in
+`test/escrow.test.ts`. The `OPEN -> SIP -> ...` paths require an
+`>Arriving ` Primus fixture which we don't have in-repo yet, so those
+tests are `describe.skip`'d pending a v2 fixture.
 
 ## Out of scope
 

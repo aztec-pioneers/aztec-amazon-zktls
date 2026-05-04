@@ -1,4 +1,4 @@
-"""Smoke-test XPaths against example-order.html.
+"""Smoke-test Primus XPaths against checked-in Amazon HTML fixtures.
 
 The Primus attestor parser (per the SDK's own html.test.ts and the runtime
 error `[ParseHtmlError][Find] can not find attribute by class,"od-status-..."`)
@@ -17,6 +17,8 @@ We compensate by leaning on Amazon's per-element `data-component` markers
 (itemTitle, shippingAddress, shipmentStatus) which are stable, unique-per-item
 anchors that don't need text-matching predicates.
 """
+import sys
+
 import lxml.html
 from pathlib import Path
 
@@ -37,56 +39,87 @@ def extract(node) -> str:
     return str(node)
 
 
-doc = lxml.html.parse(str(Path(__file__).parent.parent / "example-order.html"))
+ROOT = Path(__file__).resolve().parents[3]
+FRONTEND = Path(__file__).resolve().parent.parent
 
-# Mirror exactly the route's parsePath strings. The Primus parser dialect
-# only accepts: `//*[@id="X"]/tag[N]/tag[N]/...` — id-anchored wildcard
-# descendant, then pure child-axis with every step indexed [N]. No
-# data-component/class predicates, no descendant `//` mid-path, no functions.
-XPATHS = {
-    "shipmentStatus": '//*[@id="shipment-top-row"]/div[1]/div[1]/h4[1]',
-    "productTitle": (
-        '//*[@id="orderDetails"]'
-        '/div[1]/div[3]/div[1]/div[1]/div[7]/div[1]/div[1]/div[1]/div[1]'
-        '/div[1]/div[1]/div[1]/div[1]/div[2]/div[1]/div[1]/div[1]/div[2]'
-        '/div[1]/div[1]/div[1]/a[1]'
-    ),
-    "shipTo": (
-        '//*[@id="orderDetails"]'
-        '/div[1]/div[3]/div[1]/div[1]/div[6]/div[1]/div[1]/div[1]/div[1]'
-        '/div[1]/div[1]/div[1]/div[1]/div[1]/ul[1]'
-    ),
-    # Grand total value span. li[6] is position-dependent on the fee row count.
-    "grandTotal": (
-        '//*[@id="od-subtotals"]'
-        '/div[1]/div[1]/ul[1]/li[6]/span[1]/div[1]/div[2]/span[1]'
-    ),
-}
+FIXTURES = []
+order_fixture = FRONTEND / "example-order.html"
+if order_fixture.exists():
+    # Mirror exactly the order-summary template parsePath strings. The Primus
+    # parser dialect only accepts id-anchored wildcard descendant, then pure
+    # child-axis with every step indexed [N].
+    FIXTURES.append(
+        (
+            order_fixture,
+            {
+                "shipmentStatus": '//*[@id="shipment-top-row"]/div[1]/div[1]/h4[1]',
+                "productTitle": (
+                    '//*[@id="orderDetails"]'
+                    '/div[1]/div[3]/div[1]/div[1]/div[7]/div[1]/div[1]/div[1]/div[1]'
+                    '/div[1]/div[1]/div[1]/div[1]/div[2]/div[1]/div[1]/div[1]/div[2]'
+                    '/div[1]/div[1]/div[1]/a[1]'
+                ),
+                "shipTo": (
+                    '//*[@id="orderDetails"]'
+                    '/div[1]/div[3]/div[1]/div[1]/div[6]/div[1]/div[1]/div[1]/div[1]'
+                    '/div[1]/div[1]/div[1]/div[1]/div[1]/ul[1]'
+                ),
+                "grandTotal": (
+                    '//*[@id="od-subtotals"]'
+                    '/div[1]/div[1]/ul[1]/li[6]/span[1]/div[1]/div[2]/span[1]'
+                ),
+            },
+        )
+    )
+
+delivery_fixture = ROOT / "example.html"
+if delivery_fixture.exists():
+    FIXTURES.append(
+        (
+            delivery_fixture,
+            {
+                "pickupCode": '//*[@id="pickupInformation-container"]/h1[1]',
+            },
+        )
+    )
 
 ok = True
-for key, xp in XPATHS.items():
-    print(f"[{key}]")
-    print(f"  xpath:    {xp}")
-    try:
-        result = doc.xpath(xp)
-    except Exception as e:
-        print(f"  ERROR:    {e}\n")
-        ok = False
-        continue
+if not FIXTURES:
+    print("No HTML fixtures found")
+    sys.exit(1)
 
-    if isinstance(result, list):
-        if not result:
-            print("  matched:  0 nodes  (XPath returned empty list)\n")
+for fixture, xpaths in FIXTURES:
+    print(f"fixture: {fixture.relative_to(ROOT)}")
+    doc = lxml.html.parse(str(fixture))
+    for key, xp in xpaths.items():
+        print(f"[{key}]")
+        print(f"  xpath:    {xp}")
+        try:
+            result = doc.xpath(xp)
+        except Exception as e:
+            print(f"  ERROR:    {e}\n")
             ok = False
             continue
-        first = result[0]
-        text = extract(first)
-        printed = " ".join(text.split())
-        print(f"  matched:  {len(result)} node(s); showing [0]")
-        print(f"  raw_len:  {len(text)}")
-        print(f"  text:     {printed!r}")
-    else:
-        print(f"  scalar:   {result!r}")
+
+        if isinstance(result, list):
+            if not result:
+                print("  matched:  0 nodes  (XPath returned empty list)\n")
+                ok = False
+                continue
+            first = result[0]
+            text = extract(first)
+            printed = " ".join(text.split())
+            print(f"  matched:  {len(result)} node(s); showing [0]")
+            print(f"  raw_len:  {len(text)}")
+            print(f"  text:     {printed!r}")
+        else:
+            print(f"  scalar:   {result!r}")
+        print()
+
     print()
 
-print("PASS" if ok else "FAIL")
+if ok:
+    print("PASS")
+else:
+    print("FAIL")
+    sys.exit(1)

@@ -3,7 +3,7 @@
 // this file just declares the public/private split and forwards.
 
 use amazon_zktls_lib::{
-    Contents, Hashes, PublicOutputs, ShipToHints, MAX_URL_LEN, verify,
+    Contents, Hashes, PublicOutputs, ShipToHints, MAX_STATUS_NEEDLE_LEN, MAX_URL_LEN, verify,
 };
 
 fn main(
@@ -15,6 +15,7 @@ fn main(
     request_url: BoundedVec<u8, MAX_URL_LEN>,
     recipient: pub [u8; 20],
     timestamp: pub u64,
+    expected_status: pub BoundedVec<u8, MAX_STATUS_NEEDLE_LEN>,
     hashes: pub Hashes,
     contents: Contents,
     ship_to_hints: ShipToHints,
@@ -29,6 +30,7 @@ fn main(
         request_url,
         recipient,
         timestamp,
+        expected_status,
         hashes,
         contents,
         ship_to_hints,

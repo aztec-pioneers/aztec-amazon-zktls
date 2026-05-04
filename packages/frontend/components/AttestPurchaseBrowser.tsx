@@ -155,7 +155,10 @@ function extractByXPath(html: string, xpath: string): string | null {
 // keeps the focus on the attestation data.
 const RECIPIENT = `0x${"00".repeat(20)}`;
 
-const TEMPLATE_ID = process.env.NEXT_PUBLIC_PRIMUS_TEMPLATE_ID ?? "";
+const TEMPLATE_ID =
+  process.env.NEXT_PUBLIC_PRIMUS_INVOICE_TEMPLATE_ID ??
+  process.env.NEXT_PUBLIC_PRIMUS_TEMPLATE_ID ??
+  "";
 const DEFAULT_ORDER_ID = process.env.NEXT_PUBLIC_AMAZON_ORDER_ID ?? "";
 
 // Build the print.html URL the extension will navigate to. The Primus
@@ -183,7 +186,7 @@ export default function AttestPurchaseBrowser() {
 
   const handleAttest = useCallback(async () => {
     if (!TEMPLATE_ID) {
-      setError("NEXT_PUBLIC_PRIMUS_TEMPLATE_ID is not set");
+      setError("NEXT_PUBLIC_PRIMUS_INVOICE_TEMPLATE_ID is not set");
       setStatus("error");
       return;
     }
