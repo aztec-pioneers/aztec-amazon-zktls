@@ -14,7 +14,7 @@ type DeliveryCodeResult = {
 const PICKUP_CODE_FIELD = "pickupCode";
 const PICKUP_CODE_XPATH = '//*[@id="pickupInformation-container"]/h1[1]';
 const RECIPIENT = `0x${"00".repeat(20)}`;
-const DEFAULT_TEMPLATE_ID = "23a39be5-1dd9-45d7-addb-4ba05e0adb74";
+const DEFAULT_TEMPLATE_ID = "580ea452-cbbf-4644-ab43-991f3bdd73b3";
 
 function envOr(value: string | undefined, fallback: string): string {
   const trimmed = value?.trim();
