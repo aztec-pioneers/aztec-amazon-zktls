@@ -148,6 +148,10 @@ summary {
   color: var(--foreground);
 }
 
+.attest .row .field {
+  min-width: 220px;
+}
+
 .field-wide {
   width: 100%;
 }
@@ -241,6 +245,12 @@ summary {
   word-break: break-all;
 }
 
+.muted {
+  font-size: 12px;
+  color: #666;
+  margin: 0 0 12px;
+}
+
 .match-pill {
   font-size: 11px;
   font-weight: 500;
@@ -257,6 +267,64 @@ summary {
 
 .match-false {
   color: #b91c1c;
+}
+
+.prove-panel {
+  margin-top: 16px;
+  border-top: 1px solid currentColor;
+  padding-top: 12px;
+}
+
+.prove-panel h2 {
+  margin-top: 0;
+}
+
+.proof-error {
+  color: #b91c1c;
+  border: 1px solid #b91c1c;
+  padding: 6px 8px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 12px;
+}
+
+.proof-output {
+  margin-top: 16px;
+}
+
+.proof-output h3 {
+  margin: 0 0 8px;
+}
+
+.output-table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.output-key {
+  padding: 4px 12px 4px 0;
+  font-weight: 500;
+  vertical-align: top;
+}
+
+.output-value {
+  padding: 4px 0;
+  vertical-align: top;
+}
+
+.wide-code {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.subtle {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.proof-meta {
+  margin: 12px 0 8px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -282,6 +350,9 @@ summary {
     color: #a3a3a3;
   }
   .field-value {
+    color: #a3a3a3;
+  }
+  .muted {
     color: #a3a3a3;
   }
   .launch-preview code {

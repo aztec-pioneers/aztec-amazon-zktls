@@ -173,22 +173,25 @@ export async function computeNullifier(signature: Uint8Array): Promise<bigint> {
 // the offset arithmetic.
 
 const URL_FIELDS = 1 + CIRCUIT_DIMS.MAX_URL_LEN; // BoundedVec.len + storage
+const STATUS_NEEDLE_FIELDS = 1 + CIRCUIT_DIMS.MAX_STATUS_NEEDLE_LEN;
 const PARAM_PUBLIC_FIELDS =
-  32 + 32 + 32 + URL_FIELDS + 20 + 1 + 4 * 32;
+  32 + 32 + 32 + URL_FIELDS + 20 + 1 + STATUS_NEEDLE_FIELDS + 4 * 32;
 const IDX_ASIN = PARAM_PUBLIC_FIELDS;
 const IDX_GRAND_TOTAL = IDX_ASIN + 1;
 const IDX_ADDRESS_COMMITMENT = IDX_GRAND_TOTAL + 1;
 const IDX_NULLIFIER = IDX_ADDRESS_COMMITMENT + 1;
-export const PUBLIC_INPUTS_LENGTH = IDX_NULLIFIER + 1;
+const IDX_SHIPMENT_DATE = IDX_NULLIFIER + 1;
+export const PUBLIC_INPUTS_LENGTH = IDX_SHIPMENT_DATE + 1;
 
 export interface DecodedOutputs {
   asin: string;          // 10-byte ASCII, decoded
   grandTotalCents: bigint;
   addressCommitment: bigint;
   nullifier: bigint;
+  shipmentDate: bigint;
 }
 
-// Decode the four public outputs out of a `ProofData.publicInputs`
+// Decode the public outputs out of a `ProofData.publicInputs`
 // array (hex-string Fields). `len` is the ASCII length of the ASIN
 // (always 10 for Amazon).
 export function decodePublicOutputs(
@@ -204,6 +207,7 @@ export function decodePublicOutputs(
     grandTotalCents: BigInt(publicInputs[IDX_GRAND_TOTAL]),
     addressCommitment: BigInt(publicInputs[IDX_ADDRESS_COMMITMENT]),
     nullifier: BigInt(publicInputs[IDX_NULLIFIER]),
+    shipmentDate: BigInt(publicInputs[IDX_SHIPMENT_DATE]),
   };
 }
 

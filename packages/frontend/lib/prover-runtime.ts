@@ -20,9 +20,15 @@ export function getProverRuntimeProfile(): {
 
 export function getSharedBarretenberg(threads: number): Promise<Barretenberg> {
   if (!sharedBb || sharedBb.threads !== threads) {
+    const promise = Barretenberg.new({ threads }).catch((error) => {
+      if (sharedBb?.promise === promise) {
+        sharedBb = null;
+      }
+      throw error;
+    });
     sharedBb = {
       threads,
-      promise: Barretenberg.new({ threads }),
+      promise,
     };
   }
   return sharedBb.promise;

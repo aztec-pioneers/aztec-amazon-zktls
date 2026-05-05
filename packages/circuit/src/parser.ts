@@ -103,6 +103,7 @@ function locateGrandTotalLen(grandTotal: string): number {
 function hexToBytes(hex: string): Uint8Array {
   const s = hex.startsWith("0x") ? hex.slice(2) : hex;
   if (s.length % 2) throw new Error(`odd-length hex: ${hex}`);
+  if (!/^[0-9a-f]*$/i.test(s)) throw new Error(`invalid hex: ${hex}`);
   const out = new Uint8Array(s.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
   return out;
@@ -190,6 +191,52 @@ function parseEnvelope(att: PrimusAttestationBase) {
   };
 }
 
+function parseHashedContents<K extends string>({
+  dataObj,
+  plaintexts,
+  fieldMap,
+  maxByField,
+  skipSha256Check = false,
+}: {
+  dataObj: Record<string, string>;
+  plaintexts: Record<string, string>;
+  fieldMap: { readonly [P in K]: string };
+  maxByField: { readonly [P in K]: number };
+  skipSha256Check?: boolean;
+}) {
+  const hashes = {} as Record<K, number[]>;
+  const contents = {} as Record<K, ReturnType<typeof toBoundedVec>>;
+
+  for (const snake of Object.keys(fieldMap) as K[]) {
+    const camel = fieldMap[snake];
+    const hex = dataObj[camel];
+    if (typeof hex !== "string" || !/^[0-9a-f]{64}$/i.test(hex)) {
+      throw new Error(`missing/invalid hash for field '${camel}' in attestation.data`);
+    }
+
+    const plain = plaintexts[camel];
+    if (typeof plain !== "string") {
+      throw new Error(`plaintexts['${camel}'] missing`);
+    }
+
+    const expectedHash = hexToBytes(hex);
+    hashes[snake] = Array.from(expectedHash);
+    contents[snake] = toBoundedVec(plain, maxByField[snake], camel);
+
+    if (!skipSha256Check) {
+      const local = sha256(new TextEncoder().encode(plain));
+      if (!sameBytes(local, expectedHash)) {
+        throw new Error(
+          `sha256(plaintexts['${camel}']) does not match attestation.data['${camel}']` +
+            ` - got ${bytesToHex(local)}, expected ${bytesToHex(expectedHash)}`,
+        );
+      }
+    }
+  }
+
+  return { hashes, contents };
+}
+
 export interface ParseOptions {
   // Optional override: skip sha256 self-check (useful if you want the
   // circuit itself to be the integrity oracle).
@@ -207,50 +254,21 @@ export function parseAttestation(
 ): CircuitInputs {
   const common = parseEnvelope(att);
 
-  // 4. Data hashes: attestation.data is JSON like
-  //    `{"shipmentStatus":"<sha256>", ...}`. Map to Noir snake_case fields.
-  const hashesByField = {} as CircuitInputs["hashes"];
-  const expectedHashes = {} as Record<FieldKey, Uint8Array>;
-  for (const snake of Object.keys(FIELD_MAP) as FieldKey[]) {
-    const camel = FIELD_MAP[snake];
-    const hex = common.dataObj[camel];
-    if (typeof hex !== "string" || !/^[0-9a-f]{64}$/i.test(hex)) {
-      throw new Error(`missing/invalid hash for field '${camel}' in attestation.data`);
-    }
-    const bytes = hexToBytes(hex);
-    expectedHashes[snake] = bytes;
-    hashesByField[snake] = Array.from(bytes);
-  }
-
-  // 5. Contents: pad each plaintext into its own BoundedVec. Verify the
-  //    local sha256 matches the signed hash as a sanity check.
-  const contentsByField = {} as CircuitInputs["contents"];
   const maxByField: Record<FieldKey, number> = {
     shipment_status: CIRCUIT_DIMS.MAX_SHIPMENT_STATUS_LEN,
     product_title: CIRCUIT_DIMS.MAX_PRODUCT_TITLE_LEN,
     ship_to: CIRCUIT_DIMS.MAX_SHIP_TO_LEN,
     grand_total: CIRCUIT_DIMS.MAX_GRAND_TOTAL_LEN,
   };
-  for (const snake of Object.keys(FIELD_MAP) as FieldKey[]) {
-    const camel = FIELD_MAP[snake];
-    const plain = plaintexts[camel];
-    if (typeof plain !== "string") {
-      throw new Error(`plaintexts['${camel}'] missing`);
-    }
-    contentsByField[snake] = toBoundedVec(plain, maxByField[snake], camel);
-    if (!opts.skipSha256Check) {
-      const local: Uint8Array = sha256(new TextEncoder().encode(plain));
-      const expected = expectedHashes[snake];
-      if (!sameBytes(local, expected)) {
-        throw new Error(
-          `sha256(plaintexts['${camel}']) does not match attestation.data['${camel}']` +
-            ` - got ${bytesToHex(local)}, expected ${bytesToHex(expected)}`,
-        );
-      }
-    }
-  }
+  const { hashes: hashesByField, contents: contentsByField } =
+    parseHashedContents<FieldKey>({
+      dataObj: common.dataObj,
+      plaintexts,
+      fieldMap: FIELD_MAP,
+      maxByField,
+      skipSha256Check: opts.skipSha256Check,
+    });
 
-  // 6. Allowed URL + request URL as BoundedVec<u8, MAX_URL_LEN>.
   const allowed_url = toBoundedVec(
     AMAZON_ALLOWED_URL,
     CIRCUIT_DIMS.MAX_URL_LEN,
@@ -262,7 +280,6 @@ export function parseAttestation(
     "request_url",
   );
 
-  // 8. Hints for the in-circuit extractors.
   const ship_to_hints = locateShipToHints(plaintexts[FIELD_MAP.ship_to]);
   const grand_total_len = locateGrandTotalLen(plaintexts[FIELD_MAP.grand_total]);
   if (grand_total_len > CIRCUIT_DIMS.MAX_GRAND_TOTAL_DIGITS) {
@@ -271,10 +288,6 @@ export function parseAttestation(
     );
   }
 
-  // 9. Status needle. Default to 'delivered' so the bin circuit keeps
-  //    behaving identically to the previous hardcoded matcher. Sanity:
-  //    the chosen needle MUST appear in the supplied plaintext, otherwise
-  //    the circuit will fail and the test runner buries the cause.
   const statusKind: ExpectedStatusKind = opts.expectedStatus ?? "delivered";
   const expected_status = expectedStatusBytes(statusKind);
   if (!opts.skipSha256Check) {
@@ -310,48 +323,19 @@ export function parseDeliveryCodeAttestation(
   opts: ParseOptions = {},
 ): DeliveryCodeCircuitInputs {
   const common = parseEnvelope(att);
-  const hashesByField = {} as DeliveryCodeCircuitInputs["hashes"];
-  const expectedHashes = {} as Record<DeliveryCodeFieldKey, Uint8Array>;
-
-  for (const snake of Object.keys(
-    DELIVERY_CODE_FIELD_MAP,
-  ) as DeliveryCodeFieldKey[]) {
-    const camel = DELIVERY_CODE_FIELD_MAP[snake];
-    const hex = common.dataObj[camel];
-    if (typeof hex !== "string" || !/^[0-9a-f]{64}$/i.test(hex)) {
-      throw new Error(`missing/invalid hash for field '${camel}' in attestation.data`);
-    }
-    const bytes = hexToBytes(hex);
-    expectedHashes[snake] = bytes;
-    hashesByField[snake] = Array.from(bytes);
-  }
-
-  const contentsByField = {} as DeliveryCodeCircuitInputs["contents"];
   const maxByField: Record<DeliveryCodeFieldKey, number> = {
     delivery_status: DELIVERY_CODE_DIMS.MAX_DELIVERY_STATUS_LEN,
     pickup_code: DELIVERY_CODE_DIMS.MAX_PICKUP_CODE_HTML_LEN,
     order_id: DELIVERY_CODE_DIMS.MAX_DELIVERY_ORDER_ID_HTML_LEN,
   };
-  for (const snake of Object.keys(
-    DELIVERY_CODE_FIELD_MAP,
-  ) as DeliveryCodeFieldKey[]) {
-    const camel = DELIVERY_CODE_FIELD_MAP[snake];
-    const plain = plaintexts[camel];
-    if (typeof plain !== "string") {
-      throw new Error(`plaintexts['${camel}'] missing`);
-    }
-    contentsByField[snake] = toBoundedVec(plain, maxByField[snake], camel);
-    if (!opts.skipSha256Check) {
-      const local: Uint8Array = sha256(new TextEncoder().encode(plain));
-      const expected = expectedHashes[snake];
-      if (!sameBytes(local, expected)) {
-        throw new Error(
-          `sha256(plaintexts['${camel}']) does not match attestation.data['${camel}']` +
-            ` - got ${bytesToHex(local)}, expected ${bytesToHex(expected)}`,
-        );
-      }
-    }
-  }
+  const { hashes: hashesByField, contents: contentsByField } =
+    parseHashedContents<DeliveryCodeFieldKey>({
+      dataObj: common.dataObj,
+      plaintexts,
+      fieldMap: DELIVERY_CODE_FIELD_MAP,
+      maxByField,
+      skipSha256Check: opts.skipSha256Check,
+    });
 
   const allowed_url = toBoundedVec(
     AMAZON_SHIP_TRACK_ALLOWED_URL,

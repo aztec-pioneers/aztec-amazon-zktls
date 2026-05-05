@@ -15,14 +15,15 @@ import { Barretenberg, BackendType } from "@aztec/bb.js";
 import {
   AttestationProver,
   CIRCUIT_DIMS,
+  PUBLIC_INPUTS_LENGTH,
   DELIVERY_CODE_PUBLIC_INPUTS_LENGTH,
   EXPECTED_STATUS,
   centsToCurrency,
   computeAddressCommitment,
   computeNullifier,
+  decodePublicOutputs,
   decodeDeliveryCodePublicOutputs,
   expectedStatusBytes,
-  fieldToAsciiString,
   parseAttestation,
   parseDeliveryCodeAttestation,
   type AmazonDeliveryCodeAttestation,
@@ -73,53 +74,6 @@ const DELIVERY_FIXTURE_HAS_PLAINTEXTS = (() => {
     return false;
   }
 })();
-
-if (!FIXTURE_HAS_PLAINTEXTS) {
-  console.warn(
-    `[verify.test] fixture ${ORDER_SUMMARY_ATT_PATH} has no \`_plaintexts\` sidecar - ` +
-      `skipping prove/verify. Regenerate by running the frontend ` +
-      `(\`pnpm --filter @amazon-zktls/frontend dev\`), completing an attestation, ` +
-      `and clicking "Download attestation.json"; the new file ` +
-      `includes the plaintexts the Noir circuit needs as private inputs.`,
-  );
-}
-if (!DELIVERY_FIXTURE_HAS_PLAINTEXTS) {
-  console.warn(
-    `[verify.test] fixture ${DELIVERY_CODE_ATT_PATH} is missing the v10 ` +
-      `deliveryStatus/pickupCode/orderId plaintext+hash set - skipping ` +
-      `delivery-code prove/verify. Regenerate by running the frontend, ` +
-      `completing a delivery_code attestation, and clicking "Download attestation.json".`,
-  );
-}
-
-// Public-input layout of `bin/main.nr`. The returned `PublicOutputs` is
-// appended after the parameter-side public inputs.
-//
-//   [0..32)         public_key_x          32
-//   [32..64)        public_key_y          32
-//   [64..96)        hash                  32
-//   [96..96+128)    allowed_url.storage   MAX_URL_LEN
-//   [224..225)      allowed_url.len        1
-//   [225..245)      recipient             20
-//   [245..246)      timestamp              1
-//   [246..262)      expected_status.storage MAX_STATUS_NEEDLE_LEN
-//   [262..263)      expected_status.len    1
-//   [263..295)      hashes.shipment_status 32
-//   [295..327)      hashes.product_title   32
-//   [327..359)      hashes.ship_to         32
-//   [359..391)      hashes.grand_total     32
-//   [391..392)      asin                    (output)
-//   [392..393)      grand_total             (output)
-//   [393..394)      address_commitment     (output)
-//   [394..395)      nullifier              (output)
-//   [395..396)      shipment_date           (output, mocked to 0)
-const URL_FIELDS = CIRCUIT_DIMS.MAX_URL_LEN + 1; // BoundedVec storage + len
-const NEEDLE_FIELDS = CIRCUIT_DIMS.MAX_STATUS_NEEDLE_LEN + 1;
-const IDX_ASIN = 32 + 32 + 32 + URL_FIELDS + 20 + 1 + NEEDLE_FIELDS + 4 * 32;
-const IDX_GRAND_TOTAL = IDX_ASIN + 1;
-const IDX_ADDRESS_COMMITMENT = IDX_GRAND_TOTAL + 1;
-const IDX_NULLIFIER = IDX_ADDRESS_COMMITMENT + 1;
-const IDX_SHIPMENT_DATE = IDX_NULLIFIER + 1;
 
 async function loadInputs() {
   const att = JSON.parse(
@@ -191,18 +145,18 @@ describe("amazon-zktls verify", () => {
       const inputs = await loadInputs();
       const proof = await prover.prove(inputs);
       expect(proof.proof).toBeInstanceOf(Uint8Array);
-      expect(proof.publicInputs.length).toBe(IDX_SHIPMENT_DATE + 1);
+      expect(proof.publicInputs.length).toBe(PUBLIC_INPUTS_LENGTH);
       const ok = await prover.verify(proof);
       expect(ok).toBe(true);
 
+      const outputs = decodePublicOutputs(proof.publicInputs);
+
       // ASIN: known fixture has /dp/B0FF98TQNP in the productTitle.
-      const asin = fieldToAsciiString(proof.publicInputs[IDX_ASIN], 10);
-      expect(asin).toBe("B0FF98TQNP");
+      expect(outputs.asin).toBe("B0FF98TQNP");
 
       // grand_total: fixture is $0.28 = 28 cents.
-      const cents = BigInt(proof.publicInputs[IDX_GRAND_TOTAL]);
-      expect(cents).toBe(28n);
-      expect(centsToCurrency(cents)).toBe("$0.28");
+      expect(outputs.grandTotalCents).toBe(28n);
+      expect(centsToCurrency(outputs.grandTotalCents)).toBe("$0.28");
 
       // Address commitment: recompute from the known plaintext lines and
       // assert equality with the public output.
@@ -212,18 +166,15 @@ describe("amazon-zktls verify", () => {
         city_state_zip: "DENVER, CO 80223-2126",
         country: "United States",
       });
-      const gotCommitment = BigInt(proof.publicInputs[IDX_ADDRESS_COMMITMENT]);
-      expect(gotCommitment).toBe(expectedCommitment);
+      expect(outputs.addressCommitment).toBe(expectedCommitment);
 
       // Nullifier: recompute from the signature bytes (r||s, 64 B).
       const sigBytes = new Uint8Array(inputs.signature);
       const expectedNullifier = await computeNullifier(sigBytes);
-      const gotNullifier = BigInt(proof.publicInputs[IDX_NULLIFIER]);
-      expect(gotNullifier).toBe(expectedNullifier);
+      expect(outputs.nullifier).toBe(expectedNullifier);
 
       // shipment_date: hardcoded to 0 in the circuit (real extraction TBD).
-      const date = BigInt(proof.publicInputs[IDX_SHIPMENT_DATE]);
-      expect(date).toBe(0n);
+      expect(outputs.shipmentDate).toBe(0n);
     },
   );
 

@@ -1,54 +1,46 @@
 # `@amazon-zktls/frontend`
 
-Next.js + React app that drives the end-to-end zkTLS flow for an Amazon
-order:
+Next.js + React app that drives the browser-side Primus zkTLS flows:
 
-1. **Attest** — uses `@primuslabs/zktls-js-sdk` + the Primus Chrome
-   extension to notarize an Amazon order-summary page. Produces a
-   signed attestation JSON with sha256 digests of `shipmentStatus`,
-   `productTitle`, `shipTo`, `grandTotal`.
-2. **Prove** — runs the Noir circuit from
-   [`@amazon-zktls/circuit`](../circuit/) directly in the browser via
-   `@aztec/bb.js`'s WasmWorker backend. Produces a proof + four public
-   outputs the downstream escrow flow consumes: `asin`, `grand_total`
-   (cents), `address_commitment`, `nullifier`.
+1. **Invoice / order summary** — notarizes Amazon `print.html` and proves
+   `shipmentStatus`, `productTitle`, `shipTo`, and `grandTotal`.
+2. **Delivery code** — notarizes Amazon package tracking and proves
+   `deliveryStatus`, `pickupCode`, and `orderId`.
+
+Both flows use `@primuslabs/zktls-js-sdk` + the Primus Chrome extension for
+attestation, then run the matching Noir circuit from
+[`@amazon-zktls/circuit`](../circuit/) directly in the browser via bb.js.
 
 ## How it works
 
-1. The browser collects an `orderID` and the user's amazon.com session
-   cookies (no Amazon login on this site — you paste DevTools cookies).
-2. The browser POSTs to `/api/primus/attest` (server-only).
-3. The server uses `@primuslabs/network-core-sdk` to:
-   - submit an on-chain task on Base Sepolia (the SDK signs/sends a tx with
-     the server's internal key — never a user wallet),
-   - hand the request `(amazon URL + Cookie header)` and a list of XPath
-     resolves to a Primus attestor running in a Phala TEE,
-   - poll the attestor for the result + signature.
-4. The attestor proxies the TLS connection to amazon.com, decrypts the
-   response inside the enclave, runs each XPath, computes
-   `sha256(extracted_outer_html)`, and signs the bundle.
-5. The server returns `{attestation, privateData}` to the browser.
-   `privateData[i].content` is the plaintext outer-HTML the attestor saw;
-   the attestation contains the matching signed sha256.
+1. The browser builds a Primus extension request from the selected template
+   and Amazon launch URL.
+2. The browser POSTs the unsigned request to `/api/primus/sign`.
+3. The server signs with `PRIMUS_APP_SECRET`; the secret never reaches the
+   client bundle.
+4. The Primus extension opens Amazon, captures the matching TLS response, runs
+   the template XPaths, computes `sha256(extracted_plaintext)`, and returns a
+   signed attestation.
+5. The browser verifies the attestation signature, recovers the private
+   plaintexts needed by Noir, runs the local proof, and lets the user download
+   the attestation/proof JSON.
 
-The Noir circuit's job (out of scope here): re-hash each `content` with
-SHA-256, equate to the signed digest, ECDSA-verify the attestor signature,
-and slice fields like the ASIN out of the outer-HTML byte string.
+The Noir circuits re-hash each private plaintext with SHA-256, equate those
+hashes to the attestation data, ECDSA-verify the attestor signature, and slice
+the public outputs from the signed plaintext bytes.
 
 ## Prereqs
 
 - Node.js 18+, `pnpm`.
 - A Primus Developer Hub project — get `appId` + `appSecret` at
   https://dev.primuslabs.xyz. 100 free proofs per `appId`.
-- An EOA with Base Sepolia testnet ETH (the SDK fee per `submitTask` is
-  small; ~10 gwei × default gas).
-- An amazon.com session you can pull cookies for (DevTools → Application →
-  Cookies → `https://www.amazon.com`).
+- Primus browser extension installed and enabled.
+- An active amazon.com login in the browser profile used by the extension.
 
 ## Run
 
 ```bash
-cp .env.local.example .env.local   # fill in PRIMUS_* (appId/appSecret/templateId)
+cp .env.local.example .env.local   # fill in Primus app/template settings
 # from the repo root
 pnpm install
 pnpm --filter @amazon-zktls/circuit build:nr   # compile the Noir circuit once
@@ -86,8 +78,7 @@ when isolation is on, `1` otherwise.
 
 ## XPath dialect
 
-Primus' attestor parser is a restricted XPath 1.0 subset, learned the hard
-way from runtime errors:
+Primus' attestor parser is a restricted XPath 1.0 subset:
 
 - `//*[@id="X"]/tag[N]/tag[N]/...` — id-anchored wildcard descendant, then
   pure child-axis. Every element step requires an explicit `[N]` index.
@@ -98,10 +89,9 @@ way from runtime errors:
 - Returns the matched element's outer HTML (open tag + attrs + inner +
   close), not its text content.
 
-`scripts/test_xpaths.py` validates each path against `example-order.html`
-using libxml2 (the same parser the attestor links) and prints the exact
-bytes the attestor will hash. Run after any path change — the live
-attestation costs gas; this doesn't.
+`scripts/test_xpaths.py` validates paths against local Amazon HTML fixtures
+when present. Those fixtures contain account/order data and should stay
+untracked; do not commit them.
 
 ```bash
 python3 scripts/test_xpaths.py
@@ -109,27 +99,25 @@ python3 scripts/test_xpaths.py
 
 ## Trust model
 
-`algorithmType: "proxytls"` means the attestor sees plaintext briefly inside
-its Phala TEE — you're trusting Phala's TEE attestation, not pure
-cryptography. To remove the TEE assumption, switch the route's `attMode` to
-`"mpctls"` and `noProxy: true`; the user (here, the server) then runs
-multi-party computation with the attestor and neither side ever holds
-plaintext. Slower handshake, more sites block it.
+The browser flow uses Primus' extension-backed zkTLS SDK. The server's only
+role is signing the request with `PRIMUS_APP_SECRET`; it does not receive
+Amazon cookies or fetch Amazon pages directly.
 
 ## Files
 
 - `app/api/primus/sign/route.ts` — server-side `appSecret` signer for the
-  attestation request.
+  attestation request, with template/request-shape validation.
 - `components/AttestPurchaseBrowser.tsx` — orchestrates the
   `@primuslabs/zktls-js-sdk` flow: build request, sign on the server,
   hand off to the extension, verify, capture per-field outer-HTML.
-- `components/ProveAttestation.tsx` — runs the Noir circuit
-  end-to-end in-browser. Imports the compiled bytecode from
-  `@amazon-zktls/circuit/nr/target/amazon_zktls_bin.json` and the
-  parser/prover/decoders from `@amazon-zktls/circuit`.
-- `next.config.ts` — COEP/COOP headers, `transpilePackages` for bb.js
-  + noir_js, plus the `serverExternalPackages` carve-outs that keep
-  `network-core-sdk` / `ethers` out of the server bundle.
+- `components/AttestDeliveryCode.tsx` — runs the package-tracking flow and
+  recovers the exact plaintexts Primus hashed for delivery status, locker code,
+  and order id.
+- `components/ProveAttestation.tsx` / `components/ProveDeliveryCode.tsx` — run
+  the compiled Noir circuits in-browser and render/download proof outputs.
+- `lib/primus-extraction.ts` — shared DOM/XPath/plaintext-hash recovery used by
+  both attestation flows.
+- `next.config.ts` — COEP/COOP headers needed for fast browser proving.
 
 ## Out of scope
 

@@ -70,6 +70,148 @@ pnpm dev
 pnpm test:contracts
 ```
 
+## Primus Template Creation
+
+The Primus templates are created in the Primus Developer Hub and published through the
+developer-template MCP endpoint from:
+
+```txt
+https://dev.primuslabs.xyz/myDevelopment/myTemplates/newByAI
+```
+
+That page gives a posting endpoint that includes the account-specific MCP key. Treat that
+URL like a secret and do not commit it. The current browser flows use these template env
+vars:
+
+```env
+NEXT_PUBLIC_PRIMUS_INVOICE_TEMPLATE_ID=a76464be-c145-4ec2-852c-9ce286674aa7
+NEXT_PUBLIC_PRIMUS_DELIVERY_CODE_TEMPLATE_ID=c08ac1d3-851e-472a-8591-00dfacf3c2d7
+```
+
+For delivery-code template changes, create a new template instead of mutating the old
+one, and name it with an explicit suffix such as `amazon_delivery_code-v10`. After
+publishing, update `packages/frontend/.env.local.example`, local `.env.local`, and the
+fallback template id in `packages/frontend/components/AttestDeliveryCode.tsx` if needed.
+
+The final delivery-code template is HTML-backed. Primus still expects
+`resolver.type = "JSON_PATH"` for these HTML XPaths, and `ignoreResponse = true` tells it
+to evaluate against the document body:
+
+```json
+{
+  "name": "amazon_delivery_code-v10",
+  "category": "OTHER",
+  "status": "DRAFT",
+  "dataSource": "amazon",
+  "dataPageTemplate": {
+    "baseUrl": "https://www.amazon.com/gp/your-account/ship-track"
+  },
+  "dataSourceTemplate": [
+    {
+      "requestTemplate": {
+        "targetUrlExpression": "https://www\\.amazon\\.com/gp/your-account/ship-track(?:\\?.*)?",
+        "targetUrlType": "REGX",
+        "method": "GET",
+        "ext": {},
+        "dynamicParamters": [],
+        "ignoreResponse": true
+      },
+      "responseTemplate": [
+        {
+          "resolver": {
+            "type": "JSON_PATH",
+            "expression": "//*[@id=\"topContent-container\"]/section[@class=\"pt-card promise-card\"]/h1[1]"
+          },
+          "valueType": "FIXED_VALUE",
+          "fieldType": "FIELD_REVEAL",
+          "feilds": [
+            {
+              "key": "deliveryStatus",
+              "DataType": "string"
+            }
+          ]
+        },
+        {
+          "resolver": {
+            "type": "JSON_PATH",
+            "expression": "//*[@id=\"pickupInformation-container\"]/h1[1]"
+          },
+          "valueType": "FIXED_VALUE",
+          "fieldType": "FIELD_REVEAL",
+          "feilds": [
+            {
+              "key": "pickupCode",
+              "DataType": "string"
+            }
+          ]
+        },
+        {
+          "resolver": {
+            "type": "JSON_PATH",
+            "expression": "//*[@id=\"ordersInPackage-container\"]/div[1]/div[1]/a[1]/@href"
+          },
+          "valueType": "FIXED_VALUE",
+          "fieldType": "FIELD_REVEAL",
+          "feilds": [
+            {
+              "key": "orderId",
+              "DataType": "string"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The frontend launches the Primus extension with Amazon tracking URL params from the
+tracking link. Keep all five params because Amazon's tracking page may require
+`itemId`, `ref`, `packageIndex`, `orderId`, and `shipmentId` for a stable page load:
+
+```ts
+const request = primus.generateRequestParams(templateId, RECIPIENT, {
+  timeout: 2 * 60 * 1000,
+});
+
+request.setAdditionParams(JSON.stringify({ launch_page }));
+request.setAttConditions([
+  [
+    { field: "deliveryStatus", op: "SHA256_EX" },
+    { field: "pickupCode", op: "SHA256_EX" },
+    { field: "orderId", op: "SHA256_EX" }
+  ]
+]);
+request.setAllJsonResponseFlag("true");
+```
+
+Hash matching is the important validation step. The signed hashes are in
+`JSON.parse(attestation.data)[field]`, while the plaintext candidates come from
+`primus.getAllJsonResponse(attestation.requestid)`. Do not assume the signed plaintext is
+always `outerHTML`: for the current template Primus signs direct text for
+`deliveryStatus` (`Delivered`) and `pickupCode` (`Your pickup code is 123456`), and the
+raw `href` attribute for `orderId`. The raw attribute can contain HTML entities such as
+`&amp;`, so the UI hashes the raw value first, then parses out the display order id.
+
+After a successful attestation, download the JSON from the UI. The downloaded file keeps
+the original Primus attestation intact and adds sidecar data used by tests and Noir
+proving:
+
+```json
+{
+  "_plaintexts": {
+    "deliveryStatus": "Delivered",
+    "pickupCode": "Your pickup code is 123456",
+    "orderId": "/gp/your-account/order-details?orderID=123-1234567-1234567&amp;ref=ppx_pt2_dt_b_view_detail"
+  },
+  "_values": {
+    "deliveryStatus": "Delivered",
+    "pickupCode": "123456",
+    "orderId": "123-1234567-1234567"
+  }
+}
+```
+
 ## Technical deficiencies
 
 If we move forward with this, here's the open backlog:
@@ -88,6 +230,8 @@ If we move forward with this, here's the open backlog:
 - Per-field `MAX_*` bounds in `amazon_zktls_lib` share one ceiling per axis — tighten
   them to save sha256 constraints.
 - Soundness gap in the circuit: public inputs (`recipient`, `timestamp`, `hashes`,
-  attestor pubkey) aren't bound to `hash` in-circuit. v2 should reconstruct the
-  canonical Primus message and assert `keccak256(canonical) == hash`.
+  attestor pubkey) aren't bound to `hash` in-circuit. We are tracking the canonical
+  Primus discussion in
+  [primus-labs/zktls-verification-noir#9](https://github.com/primus-labs/zktls-verification-noir/issues/9)
+  and are not fixing this locally yet.
 - I used Claude, there's slop, don't @ me.

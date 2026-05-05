@@ -13,9 +13,9 @@ It does NOT support: `contains()`, `starts-with()`, `text()`,
 `normalize-space()`, `substring*`, or any function inside or outside a
 predicate. Plan accordingly.
 
-We compensate by leaning on Amazon's per-element `data-component` markers
-(itemTitle, shippingAddress, shipmentStatus) which are stable, unique-per-item
-anchors that don't need text-matching predicates.
+Fixtures are intentionally local-only because raw Amazon HTML contains user and
+order data. Save them as untracked files when you need to smoke-test a template
+change.
 """
 import sys
 
@@ -72,8 +72,19 @@ if order_fixture.exists():
         )
     )
 
-delivery_fixture = ROOT / "example.html"
-if delivery_fixture.exists():
+delivery_fixture = next(
+    (
+        path
+        for path in (
+            ROOT / "example-delivery.html",
+            ROOT / "example.html",
+            ROOT / "example-2.html",
+        )
+        if path.exists()
+    ),
+    None,
+)
+if delivery_fixture is not None:
     FIXTURES.append(
         (
             delivery_fixture,
@@ -93,8 +104,8 @@ if delivery_fixture.exists():
 
 ok = True
 if not FIXTURES:
-    print("No HTML fixtures found")
-    sys.exit(1)
+    print("No local HTML fixtures found; nothing to smoke-test")
+    sys.exit(0)
 
 for fixture, xpaths in FIXTURES:
     print(f"fixture: {fixture.relative_to(ROOT)}")

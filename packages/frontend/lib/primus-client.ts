@@ -27,6 +27,9 @@ export function getPrimus(): Promise<PrimusZKTLSType> {
     await p.init(appId);
     instance = p;
     return p;
-  })();
+  })().catch((error) => {
+    initPromise = null;
+    throw error;
+  });
   return initPromise;
 }

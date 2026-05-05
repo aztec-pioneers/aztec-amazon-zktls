@@ -42,6 +42,9 @@ packages/circuit/dist/
 # (including the local test fixture at packages/circuit/test/fixtures/).
 attestation-*.json
 
+# local Amazon HTML fixtures contain account/order data
+example*.html
+
 # debug
 npm-debug.log*
 yarn-debug.log*

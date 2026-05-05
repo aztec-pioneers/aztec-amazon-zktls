@@ -1,8 +1,8 @@
 // Amazon Locker delivery-code extractors.
 //
-// The Primus template hashes the full outer HTML for two fields:
-//   - pickupCode: `<h1 ...>Your pickup code is 039391</h1>`
-//   - orderId: an order-details `<a>` whose href contains `orderID=...`
+// The Primus template hashes the exact plaintext returned by its XPath:
+//   - pickupCode: `Your pickup code is 123456`
+//   - orderId: an order-details href containing `orderID=...`
 //
 // This module searches the signed plaintexts for those stable anchors,
 // copies fixed-size byte arrays, and range-checks their formats.
@@ -33,8 +33,8 @@ pub fn extract_pickup_code(
 
     let start = position + PICKUP_CODE_ANCHOR_LEN;
     assert(
-        start + PICKUP_CODE_BYTES < MAX_PICKUP_CODE_HTML_LEN,
-        "pickup-code anchor too late",
+        start + PICKUP_CODE_BYTES <= pickup_code_html.len(),
+        "pickup-code value truncated",
     );
 
     let bytes = pickup_code_html.storage();
@@ -45,7 +45,10 @@ pub fn extract_pickup_code(
         out[i] = b;
     }
 
-    assert(!is_digit(bytes[start + PICKUP_CODE_BYTES]), "pickup-code too long");
+    let next_index = start + PICKUP_CODE_BYTES;
+    if next_index < pickup_code_html.len() {
+        assert(!is_digit(bytes[next_index]), "pickup-code too long");
+    }
     out
 }
 
@@ -61,8 +64,8 @@ pub fn extract_order_id(
 
     let start = position + ORDER_ID_ANCHOR_LEN;
     assert(
-        start + ORDER_ID_BYTES < MAX_DELIVERY_ORDER_ID_HTML_LEN,
-        "orderID anchor too late",
+        start + ORDER_ID_BYTES <= order_id_html.len(),
+        "orderID value truncated",
     );
 
     let bytes = order_id_html.storage();
@@ -78,7 +81,10 @@ pub fn extract_order_id(
         out[i] = b;
     }
 
-    let next = bytes[start + ORDER_ID_BYTES];
-    assert(!(is_digit(next) | (next == hyphen)), "orderID too long");
+    let next_index = start + ORDER_ID_BYTES;
+    if next_index < order_id_html.len() {
+        let next = bytes[next_index];
+        assert(!(is_digit(next) | (next == hyphen)), "orderID too long");
+    }
     out
 }

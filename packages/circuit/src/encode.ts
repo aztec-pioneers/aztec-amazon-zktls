@@ -31,6 +31,7 @@ type Bytes = Uint8Array<ArrayBufferLike>;
 function hexToBytes(hex: string): Bytes {
   const s = hex.startsWith("0x") ? hex.slice(2) : hex;
   if (s.length % 2) throw new Error(`odd-length hex: ${hex}`);
+  if (!/^[0-9a-f]*$/i.test(s)) throw new Error(`invalid hex: ${hex}`);
   const out = new Uint8Array(s.length / 2);
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(s.substr(i * 2, 2), 16);
