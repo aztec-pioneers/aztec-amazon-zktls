@@ -1,0 +1,50 @@
+{
+  "recipient": "0x0000000000000000000000000000000000000000",
+  "request": {
+    "url": "https://www.amazon.com/gp/your-account/ship-track?itemId=jlrppvlnrkksoqp&ref=ppx_yo2ov_dt_b_track_package&packageIndex=0&orderId=111-6245352-8673825&shipmentId=PB8bzCdYC",
+    "header": "",
+    "method": "GET",
+    "body": ""
+  },
+  "reponseResolve": [
+    {
+      "keyName": "deliveryStatus",
+      "parseType": "",
+      "parsePath": "{\"type\":\"FIELD_ARITHMETIC\",\"op\":\"SHA256\",\"field\":\"//*[@id=\\\"topContent-container\\\"]/section[@class=\\\"pt-card promise-card\\\"]/h1[1]\"}"
+    },
+    {
+      "keyName": "pickupCode",
+      "parseType": "",
+      "parsePath": "{\"type\":\"FIELD_ARITHMETIC\",\"op\":\"SHA256\",\"field\":\"//*[@id=\\\"pickupInformation-container\\\"]/h1[1]\"}"
+    },
+    {
+      "keyName": "orderId",
+      "parseType": "",
+      "parsePath": "{\"type\":\"FIELD_ARITHMETIC\",\"op\":\"SHA256\",\"field\":\"//*[@id=\\\"ordersInPackage-container\\\"]/div[1]/div[1]/a[1]/@href\"}"
+    }
+  ],
+  "data": "{\"orderId\":\"2025ead0ccfd8734ac48c01274e472e3e4baf99f40300e54c8ea0802e751bb43\",\"pickupCode\":\"8c60198be7cc9edbd09a56b1ee000523bf5923c8fbed587b9c523ac4aea2aeea\",\"deliveryStatus\":\"906115657390f3675639f46a572eee069155214169a45be4046933527a95c67b\"}",
+  "attConditions": "[{\"op\":\"REVEAL_HEX_STRING\",\"field\":\"{\\\"type\\\":\\\"FIELD_ARITHMETIC\\\",\\\"op\\\":\\\"SHA256\\\",\\\"field\\\":\\\"//*[@id=\\\\\\\"topContent-container\\\\\\\"]/section[@class=\\\\\\\"pt-card promise-card\\\\\\\"]/h1[1]\\\"}\",\"reveal_id\":\"deliveryStatus\"},{\"op\":\"REVEAL_HEX_STRING\",\"field\":\"{\\\"type\\\":\\\"FIELD_ARITHMETIC\\\",\\\"op\\\":\\\"SHA256\\\",\\\"field\\\":\\\"//*[@id=\\\\\\\"pickupInformation-container\\\\\\\"]/h1[1]\\\"}\",\"reveal_id\":\"pickupCode\"},{\"op\":\"REVEAL_HEX_STRING\",\"field\":\"{\\\"type\\\":\\\"FIELD_ARITHMETIC\\\",\\\"op\\\":\\\"SHA256\\\",\\\"field\\\":\\\"//*[@id=\\\\\\\"ordersInPackage-container\\\\\\\"]/div[1]/div[1]/a[1]/@href\\\"}\",\"reveal_id\":\"orderId\"}]",
+  "timestamp": 1777942823677,
+  "additionParams": "{\"algorithmType\":\"proxytls\",\"launch_page\":\"https://www.amazon.com/gp/your-account/ship-track?itemId=jlrppvlnrkksoqp&ref=ppx_yo2ov_dt_b_track_package&packageIndex=0&orderId=111-6245352-8673825&shipmentId=PB8bzCdYC\"}",
+  "attestors": [
+    {
+      "attestorAddr": "0xdb736b13e2f522dbe18b2015d0291e4b193d8ef6",
+      "url": "https://primuslabs.xyz"
+    }
+  ],
+  "signatures": [
+    "0x2aa690159d09d30bdf2868a5f85a3f714c4868934dd3be18f2b10ee1049851852e238025544790e6ad4000c7a9d25988657c8a0358808ebfda880d0e938dd61a1c"
+  ],
+  "requestid": "2476c090-04cc-4475-a5d4-702b63eb54ea",
+  "_plaintexts": {
+    "deliveryStatus": "Delivered",
+    "pickupCode": "Your pickup code is 039391",
+    "orderId": "/gp/your-account/order-details?orderID=111-6245352-8673825&amp;ref=ppx_pt2_dt_b_view_detail"
+  },
+  "_values": {
+    "deliveryStatus": "Delivered",
+    "pickupCode": "039391",
+    "orderId": "111-6245352-8673825"
+  }
+}
