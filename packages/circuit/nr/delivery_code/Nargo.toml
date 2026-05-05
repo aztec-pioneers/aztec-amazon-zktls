@@ -1,0 +1,8 @@
+[package]
+name = "amazon_zktls_delivery_code"
+type = "bin"
+authors = [""]
+compiler_version = ">=1.0.0"
+
+[dependencies]
+amazon_zktls_lib = { path = "../lib" }

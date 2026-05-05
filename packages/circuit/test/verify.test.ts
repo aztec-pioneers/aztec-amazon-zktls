@@ -7,32 +7,68 @@
 
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { BackendType } from "@aztec/bb.js";
+import { Barretenberg, BackendType } from "@aztec/bb.js";
 import {
   AttestationProver,
   CIRCUIT_DIMS,
+  DELIVERY_CODE_PUBLIC_INPUTS_LENGTH,
   EXPECTED_STATUS,
   centsToCurrency,
   computeAddressCommitment,
   computeNullifier,
+  decodeDeliveryCodePublicOutputs,
   expectedStatusBytes,
   fieldToAsciiString,
   parseAttestation,
-  type PrimusAttestation,
+  parseDeliveryCodeAttestation,
+  type AmazonDeliveryCodeAttestation,
+  type AmazonOrderSummaryAttestation,
 } from "../src/index.js";
-import { loadCircuit } from "../src/load.js";
+import { loadCircuit, loadDeliveryCodeCircuit } from "../src/load.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = resolve(HERE, "fixtures");
-const ATT_PATH = resolve(FIXTURES, "attestation-amazon.json");
+const ORDER_SUMMARY_ATT_PATH = resolve(
+  FIXTURES,
+  "attestation-amazon-order-summary.json",
+);
+const DELIVERY_CODE_ATT_PATH = resolve(
+  FIXTURES,
+  "attestation-amazon-delivery-code.json",
+);
+
+function sha256Hex(plaintext: string): string {
+  return createHash("sha256").update(plaintext).digest("hex");
+}
 
 const FIXTURE_HAS_PLAINTEXTS = (() => {
   try {
-    const parsed = JSON.parse(readFileSync(ATT_PATH, "utf-8")) as PrimusAttestation;
+    const parsed = JSON.parse(
+      readFileSync(ORDER_SUMMARY_ATT_PATH, "utf-8"),
+    ) as AmazonOrderSummaryAttestation;
     return parsed._plaintexts !== undefined;
+  } catch {
+    return false;
+  }
+})();
+const DELIVERY_FIXTURE_HAS_PLAINTEXTS = (() => {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(DELIVERY_CODE_ATT_PATH, "utf-8"),
+    ) as AmazonDeliveryCodeAttestation;
+    const hashes = JSON.parse(parsed.data) as Record<string, string>;
+    return (
+      parsed._plaintexts?.deliveryStatus !== undefined &&
+      parsed._plaintexts?.pickupCode !== undefined &&
+      parsed._plaintexts?.orderId !== undefined &&
+      typeof hashes.deliveryStatus === "string" &&
+      typeof hashes.pickupCode === "string" &&
+      typeof hashes.orderId === "string"
+    );
   } catch {
     return false;
   }
@@ -40,11 +76,19 @@ const FIXTURE_HAS_PLAINTEXTS = (() => {
 
 if (!FIXTURE_HAS_PLAINTEXTS) {
   console.warn(
-    `[verify.test] fixture ${ATT_PATH} has no \`_plaintexts\` sidecar - ` +
+    `[verify.test] fixture ${ORDER_SUMMARY_ATT_PATH} has no \`_plaintexts\` sidecar - ` +
       `skipping prove/verify. Regenerate by running the frontend ` +
       `(\`pnpm --filter @amazon-zktls/frontend dev\`), completing an attestation, ` +
       `and clicking "Download attestation.json"; the new file ` +
       `includes the plaintexts the Noir circuit needs as private inputs.`,
+  );
+}
+if (!DELIVERY_FIXTURE_HAS_PLAINTEXTS) {
+  console.warn(
+    `[verify.test] fixture ${DELIVERY_CODE_ATT_PATH} is missing the v10 ` +
+      `deliveryStatus/pickupCode/orderId plaintext+hash set - skipping ` +
+      `delivery-code prove/verify. Regenerate by running the frontend, ` +
+      `completing a delivery_code attestation, and clicking "Download attestation.json".`,
   );
 }
 
@@ -78,30 +122,49 @@ const IDX_NULLIFIER = IDX_ADDRESS_COMMITMENT + 1;
 const IDX_SHIPMENT_DATE = IDX_NULLIFIER + 1;
 
 async function loadInputs() {
-  const att = JSON.parse(await readFile(ATT_PATH, "utf-8")) as PrimusAttestation;
-  return parseAttestation(att, att._plaintexts!);
+  const att = JSON.parse(
+    await readFile(ORDER_SUMMARY_ATT_PATH, "utf-8"),
+  ) as AmazonOrderSummaryAttestation;
+  return parseAttestation(att, att._plaintexts);
+}
+
+async function loadDeliveryCodeInputs() {
+  const att = JSON.parse(
+    await readFile(DELIVERY_CODE_ATT_PATH, "utf-8"),
+  ) as AmazonDeliveryCodeAttestation;
+  return parseDeliveryCodeAttestation(att, att._plaintexts);
 }
 
 describe("amazon-zktls verify", () => {
+  let bb: Barretenberg;
   let prover: AttestationProver;
+  let deliveryProver: AttestationProver;
 
   beforeAll(async () => {
     const circuit = await loadCircuit();
+    const deliveryCircuit = await loadDeliveryCodeCircuit();
     // Force the WASM backend in vitest; the default (NativeUnixSocket)
     // races with vitest's worker pool.
-    prover = new AttestationProver({ circuit, backend: BackendType.Wasm });
+    bb = await Barretenberg.new({ backend: BackendType.Wasm });
+    prover = new AttestationProver({ circuit, bb });
+    deliveryProver = new AttestationProver({ circuit: deliveryCircuit, bb });
     await prover.init();
+    await deliveryProver.init();
   });
 
   afterAll(async () => {
     await prover?.destroy();
+    await deliveryProver?.destroy();
+    await bb?.destroy();
   });
 
   it.skipIf(!FIXTURE_HAS_PLAINTEXTS)(
     "parses the attestation into circuit inputs",
     async () => {
-      const att = JSON.parse(await readFile(ATT_PATH, "utf-8")) as PrimusAttestation;
-      const inputs = parseAttestation(att, att._plaintexts!);
+      const att = JSON.parse(
+        await readFile(ORDER_SUMMARY_ATT_PATH, "utf-8"),
+      ) as AmazonOrderSummaryAttestation;
+      const inputs = parseAttestation(att, att._plaintexts);
       expect(inputs.public_key_x).toHaveLength(32);
       expect(inputs.public_key_y).toHaveLength(32);
       expect(inputs.signature).toHaveLength(64);
@@ -189,4 +252,82 @@ describe("amazon-zktls verify", () => {
     );
     expect(literal).toBe(">Delivered ");
   });
+
+  it.skipIf(!DELIVERY_FIXTURE_HAS_PLAINTEXTS)(
+    "keeps the delivery-code attestation fixture ready for the delivery circuit",
+    async () => {
+      const att = JSON.parse(
+        await readFile(DELIVERY_CODE_ATT_PATH, "utf-8"),
+      ) as AmazonDeliveryCodeAttestation;
+      const hashes = JSON.parse(att.data) as Record<string, string>;
+
+      expect(att.request.url).toContain("/gp/your-account/ship-track");
+      expect(Object.keys(att._plaintexts ?? {}).sort()).toEqual([
+        "deliveryStatus",
+        "orderId",
+        "pickupCode",
+      ]);
+      expect(att._values).toMatchObject({
+        deliveryStatus: "Delivered",
+        orderId: "111-6245352-8673825",
+        pickupCode: "039391",
+      });
+      expect(sha256Hex(att._plaintexts.deliveryStatus)).toBe(
+        hashes.deliveryStatus,
+      );
+      expect(sha256Hex(att._plaintexts.pickupCode)).toBe(hashes.pickupCode);
+      expect(sha256Hex(att._plaintexts.orderId)).toBe(hashes.orderId);
+    },
+  );
+
+  it.skipIf(!DELIVERY_FIXTURE_HAS_PLAINTEXTS)(
+    "parses the delivery-code attestation into circuit inputs",
+    async () => {
+      const att = JSON.parse(
+        await readFile(DELIVERY_CODE_ATT_PATH, "utf-8"),
+      ) as AmazonDeliveryCodeAttestation;
+      const inputs = parseDeliveryCodeAttestation(att, att._plaintexts);
+      expect(inputs.public_key_x).toHaveLength(32);
+      expect(inputs.public_key_y).toHaveLength(32);
+      expect(inputs.signature).toHaveLength(64);
+      expect(inputs.hash).toHaveLength(32);
+      expect(inputs.recipient).toHaveLength(20);
+      expect(inputs.request_url.len).toBe(att.request.url.length);
+      expect(inputs.hashes.delivery_status).toHaveLength(32);
+      expect(inputs.hashes.pickup_code).toHaveLength(32);
+      expect(inputs.hashes.order_id).toHaveLength(32);
+    },
+  );
+
+  it.skipIf(!DELIVERY_FIXTURE_HAS_PLAINTEXTS)(
+    "executes the delivery-code circuit without failing a constraint",
+    async () => {
+      const inputs = await loadDeliveryCodeInputs();
+      await expect(deliveryProver.execute(inputs)).resolves.toBeDefined();
+    },
+  );
+
+  it.skipIf(!DELIVERY_FIXTURE_HAS_PLAINTEXTS)(
+    "proves and verifies delivery-code end-to-end + public outputs match",
+    async () => {
+      const att = JSON.parse(
+        await readFile(DELIVERY_CODE_ATT_PATH, "utf-8"),
+      ) as AmazonDeliveryCodeAttestation;
+      const inputs = await loadDeliveryCodeInputs();
+      const proof = await deliveryProver.prove(inputs);
+      expect(proof.proof).toBeInstanceOf(Uint8Array);
+      expect(proof.publicInputs.length).toBe(DELIVERY_CODE_PUBLIC_INPUTS_LENGTH);
+
+      const ok = await deliveryProver.verify(proof);
+      expect(ok).toBe(true);
+
+      const outputs = decodeDeliveryCodePublicOutputs(proof.publicInputs);
+      expect(outputs.allowedUrl).toBe(
+        "https://www.amazon.com/gp/your-account/ship-track",
+      );
+      expect(outputs.requestUrl).toBe(att.request.url);
+      expect(outputs.pickupCode).toBe("039391");
+      expect(outputs.orderId).toBe("111-6245352-8673825");
+    },
+  );
 });

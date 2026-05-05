@@ -17,9 +17,15 @@ function packageRoot(): string {
 }
 
 export const DEFAULT_BIN_PATH = "nr/target/amazon_zktls_bin.json";
+export const DELIVERY_CODE_BIN_PATH =
+  "nr/target/amazon_zktls_delivery_code.json";
 
 export async function loadCircuit(relPath: string = DEFAULT_BIN_PATH): Promise<CompiledCircuit> {
   const abs = resolve(packageRoot(), relPath);
   const raw = await readFile(abs, "utf-8");
   return JSON.parse(raw) as CompiledCircuit;
+}
+
+export async function loadDeliveryCodeCircuit(): Promise<CompiledCircuit> {
+  return loadCircuit(DELIVERY_CODE_BIN_PATH);
 }

@@ -3,50 +3,44 @@
 import { useCallback, useState } from "react";
 import {
   AttestationProver,
-  centsToCurrency,
-  decodePublicOutputs,
-  parseAttestation,
-  type AmazonOrderSummaryAttestation,
-  type DecodedOutputs,
+  decodeDeliveryCodePublicOutputs,
+  parseDeliveryCodeAttestation,
+  type AmazonDeliveryCodeAttestation,
+  type DecodedDeliveryCodeOutputs,
   type ProverInit,
 } from "@amazon-zktls/circuit";
 import {
   getProverRuntimeProfile,
   getSharedBarretenberg,
 } from "@/lib/prover-runtime";
-// Compiled bin pulled in directly from the circuit workspace. The
-// nargo target dir is symlinked into node_modules via pnpm so the JSON
-// is bundled by Next at build time. After every `pnpm --filter
-// @amazon-zktls/circuit build:nr`, restart `next dev` to pick up the
-// new bytecode.
-import compiledCircuit from "@amazon-zktls/circuit/nr/target/amazon_zktls_bin.json";
+import compiledDeliveryCodeCircuit from "@amazon-zktls/circuit/nr/target/amazon_zktls_delivery_code.json";
 
 type Status = "idle" | "running" | "success" | "error";
 
-export interface ProveAttestationProps {
-  attestation: AmazonOrderSummaryAttestation;
+export interface ProveDeliveryCodeProps {
+  attestation: AmazonDeliveryCodeAttestation;
   plaintexts: Record<string, string>;
 }
 
-interface ProveResult {
+interface ProveDeliveryCodeResult {
   proof: Uint8Array;
   publicInputs: readonly string[];
-  outputs: DecodedOutputs;
+  outputs: DecodedDeliveryCodeOutputs;
   durationMs: number;
 }
 
-export function ProveAttestation({
+export function ProveDeliveryCode({
   attestation,
   plaintexts,
-}: ProveAttestationProps) {
+}: ProveDeliveryCodeProps) {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
-  const [result, setResult] = useState<ProveResult | null>(null);
+  const [result, setResult] = useState<ProveDeliveryCodeResult | null>(null);
 
   const log = useCallback((msg: string) => {
     setLogs((l) => [...l, msg]);
-    console.log("[prove]", msg);
+    console.log("[prove:delivery_code]", msg);
   }, []);
 
   const handleProve = useCallback(async () => {
@@ -64,15 +58,13 @@ export function ProveAttestation({
           : `crossOriginIsolated=false; falling back to single-threaded WASM (check COEP/COOP headers)`,
       );
 
-      log("parsing attestation into circuit inputs");
-      const inputs = parseAttestation(attestation, plaintexts);
+      log("parsing delivery-code attestation into circuit inputs");
+      const inputs = parseDeliveryCodeAttestation(attestation, plaintexts);
 
       log("initializing shared bb.js runtime (WasmWorker, SRS load)");
       const bb = await getSharedBarretenberg(threads);
       prover = new AttestationProver({
-        // CompiledCircuit shape; cast through unknown because Next's JSON
-        // type inference doesn't carry the noir_js types.
-        circuit: compiledCircuit as unknown as ProverInit["circuit"],
+        circuit: compiledDeliveryCodeCircuit as unknown as ProverInit["circuit"],
         bb,
       });
       await prover.init();
@@ -84,7 +76,7 @@ export function ProveAttestation({
       const ok = await prover.verify(proof);
       if (!ok) throw new Error("local verify returned false");
 
-      const outputs = decodePublicOutputs(proof.publicInputs);
+      const outputs = decodeDeliveryCodePublicOutputs(proof.publicInputs);
       const durationMs = Math.round(performance.now() - t0);
       log(
         `done: ${proof.proof.length}-byte proof, ${proof.publicInputs.length} public inputs, ${durationMs}ms`,
@@ -102,8 +94,6 @@ export function ProveAttestation({
       setError(msg);
       setStatus("error");
     } finally {
-      // bb.js holds a worker pool open; release it so the page doesn't keep
-      // workers alive between prove sessions.
       try {
         await prover?.destroy();
       } catch {
@@ -116,7 +106,6 @@ export function ProveAttestation({
     if (!result) return;
     const ts =
       (attestation as { timestamp?: number | string })?.timestamp ?? Date.now();
-    // proof bytes as 0x hex; publicInputs already arrive as hex strings.
     const payload = {
       proof:
         "0x" +
@@ -124,14 +113,7 @@ export function ProveAttestation({
           .map((b) => b.toString(16).padStart(2, "0"))
           .join(""),
       publicInputs: result.publicInputs,
-      outputs: {
-        asin: result.outputs.asin,
-        grandTotalCents: result.outputs.grandTotalCents.toString(),
-        addressCommitment:
-          "0x" + result.outputs.addressCommitment.toString(16).padStart(64, "0"),
-        nullifier:
-          "0x" + result.outputs.nullifier.toString(16).padStart(64, "0"),
-      },
+      outputs: result.outputs,
       attestationTimestamp: ts,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -140,7 +122,7 @@ export function ProveAttestation({
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `proof-${ts}.json`;
+    a.download = `delivery-code-proof-${ts}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }, [attestation, result]);
@@ -154,14 +136,12 @@ export function ProveAttestation({
         paddingTop: 12,
       }}
     >
-      <h2 style={{ marginTop: 0 }}>Generate proof</h2>
+      <h2 style={{ marginTop: 0 }}>Generate delivery-code proof</h2>
       <p style={{ fontSize: 12, color: "#666", margin: "0 0 12px" }}>
-        Runs the Noir circuit (<code>amazon_zktls_bin</code>) over the
-        attestation bytes you just collected. ECDSA, URL prefix, four
-        sha256 binds, ASIN extraction, grand-total parsing, address
-        commitment, and nullifier all happen in-circuit. Multi-threaded
-        WASM via SharedArrayBuffer; needs cross-origin isolation
-        (COEP/COOP headers) to use the worker pool.
+        Runs the delivery-code Noir circuit over the attestation. The circuit
+        verifies the Primus signature, full public tracking URL, delivery
+        status, pickup-code and order-id signed sha256 hashes, and extracts the
+        fixed-size pickup code and order id as public outputs.
       </p>
 
       <button
@@ -169,7 +149,7 @@ export function ProveAttestation({
         onClick={handleProve}
         disabled={status === "running"}
       >
-        {status === "running" ? "Proving…" : "Generate proof"}
+        {status === "running" ? "Proving..." : "Generate delivery-code proof"}
       </button>{" "}
       <span className={`status status-${status}`}>{status}</span>
 
@@ -195,33 +175,28 @@ export function ProveAttestation({
           <table style={{ borderCollapse: "collapse", fontSize: 13 }}>
             <tbody>
               <tr>
-                <td style={cellL}>ASIN</td>
+                <td style={cellL}>Pickup code</td>
                 <td style={cellR}>
-                  <code>{result.outputs.asin}</code>
+                  <code>{result.outputs.pickupCode}</code>
                 </td>
               </tr>
               <tr>
-                <td style={cellL}>Grand total</td>
+                <td style={cellL}>Order id</td>
                 <td style={cellR}>
-                  <code>{centsToCurrency(result.outputs.grandTotalCents)}</code>{" "}
-                  <span style={{ fontSize: 11, opacity: 0.6 }}>
-                    ({result.outputs.grandTotalCents.toString()} cents)
-                  </span>
+                  <code>{result.outputs.orderId}</code>
                 </td>
               </tr>
               <tr>
-                <td style={cellL}>Address commitment</td>
+                <td style={cellL}>Allowed URL</td>
                 <td style={cellR}>
-                  <code style={{ fontSize: 11 }}>
-                    0x{result.outputs.addressCommitment.toString(16).padStart(64, "0")}
-                  </code>
+                  <code>{result.outputs.allowedUrl}</code>
                 </td>
               </tr>
               <tr>
-                <td style={cellL}>Nullifier</td>
+                <td style={cellL}>Request URL</td>
                 <td style={cellR}>
-                  <code style={{ fontSize: 11 }}>
-                    0x{result.outputs.nullifier.toString(16).padStart(64, "0")}
+                  <code style={{ fontSize: 11, wordBreak: "break-all" }}>
+                    {result.outputs.requestUrl}
                   </code>
                 </td>
               </tr>
@@ -233,7 +208,7 @@ export function ProveAttestation({
             {result.durationMs}ms.
           </p>
           <button type="button" onClick={handleDownloadProof}>
-            Download proof.json
+            Download delivery-code-proof.json
           </button>
         </div>
       )}

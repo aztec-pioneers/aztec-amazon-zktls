@@ -5,8 +5,8 @@
 // ">Arriving ") so the prover cannot pick a needle that always
 // matches.
 
-use crate::MAX_SHIPMENT_STATUS_LEN;
-use string_search::{StringBody, StringBody256, SubString, SubString32};
+use crate::{MAX_DELIVERY_STATUS_LEN, MAX_SHIPMENT_STATUS_LEN};
+use string_search::{StringBody, StringBody128, StringBody256, SubString, SubString32};
 
 // Fits the longest currently-known terminal-state needle
 // (">Delivered " is 11 bytes) plus slack for ">Arriving "
@@ -24,4 +24,15 @@ pub fn assert_status_contains(
         StringBody::new(shipment_status.storage(), shipment_status.len());
     let (found, _position): (bool, u32) = haystack.substring_match(needle);
     assert(found, "shipmentStatus does not contain expected status");
+}
+
+pub fn assert_delivery_status_delivered(
+    delivery_status: BoundedVec<u8, MAX_DELIVERY_STATUS_LEN>,
+) {
+    let needle_bytes: [u8; 9] = comptime { "Delivered".as_bytes() };
+    let needle: SubString32 = SubString::new(needle_bytes, 9);
+    let haystack: StringBody128 =
+        StringBody::new(delivery_status.storage(), delivery_status.len());
+    let (found, _position): (bool, u32) = haystack.substring_match(needle);
+    assert(found, "deliveryStatus does not contain Delivered");
 }

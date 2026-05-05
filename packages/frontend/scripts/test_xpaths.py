@@ -78,7 +78,15 @@ if delivery_fixture.exists():
         (
             delivery_fixture,
             {
+                "deliveryStatus": (
+                    '//*[@id="topContent-container"]'
+                    '/section[@class="pt-card promise-card"]/h1[1]'
+                ),
                 "pickupCode": '//*[@id="pickupInformation-container"]/h1[1]',
+                "orderId": (
+                    '//*[@id="ordersInPackage-container"]'
+                    '/div[1]/div[1]/a[1]/@href'
+                ),
             },
         )
     )

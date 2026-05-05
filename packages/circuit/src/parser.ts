@@ -12,17 +12,23 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   CIRCUIT_DIMS,
+  DELIVERY_CODE_DIMS,
+  DELIVERY_CODE_FIELD_MAP,
   EXPECTED_STATUS,
   FIELD_MAP,
   expectedStatusBytes,
   type CircuitInputs,
+  type DeliveryCodeCircuitInputs,
+  type DeliveryCodeFieldKey,
   type ExpectedStatusKind,
   type FieldKey,
-  type PrimusAttestation,
+  type PrimusAttestationBase,
 } from "./types.js";
 import { encodeAttestation } from "./encode.js";
 
 const AMAZON_ALLOWED_URL = "https://www.amazon.com";
+const AMAZON_SHIP_TRACK_ALLOWED_URL =
+  "https://www.amazon.com/gp/your-account/ship-track";
 
 // Anchor literals — must stay byte-identical to the comptime constants in
 // nr/lib/src/{ship_to,grand_total}.nr.
@@ -141,6 +147,49 @@ function toBoundedVec(value: string | Uint8Array, max: number, label: string) {
   return { storage, len: bytes.length };
 }
 
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function parseEnvelope(att: PrimusAttestationBase) {
+  const hash = encodeAttestation(att);
+  const { r, s, v, compact } = splitSignature(att.signatures[0]);
+  const signature = new secp256k1.Signature(
+    BigInt("0x" + bytesToHex(r)),
+    BigInt("0x" + bytesToHex(s)),
+  ).addRecoveryBit(v);
+  const pubkey = signature.recoverPublicKey(hash);
+  const pub65 = pubkey.toRawBytes(false);
+  const pubX = pub65.slice(1, 33);
+  const pubY = pub65.slice(33, 65);
+
+  const recoveredAddr = pubkeyToAddress(pub65).toLowerCase();
+  const declaredAddr = att.attestors[0].attestorAddr.toLowerCase();
+  if (recoveredAddr !== declaredAddr) {
+    throw new Error(
+      `attestor mismatch: signature recovered to ${recoveredAddr}, expected ${declaredAddr}`,
+    );
+  }
+
+  const recipientBytes = hexToBytes(att.recipient);
+  if (recipientBytes.length !== 20) {
+    throw new Error(`recipient must be 20 bytes, got ${recipientBytes.length}`);
+  }
+
+  return {
+    hash,
+    pubX,
+    pubY,
+    compact,
+    recipientBytes,
+    dataObj: JSON.parse(att.data) as Record<string, string>,
+  };
+}
+
 export interface ParseOptions {
   // Optional override: skip sha256 self-check (useful if you want the
   // circuit itself to be the integrity oracle).
@@ -152,43 +201,19 @@ export interface ParseOptions {
 }
 
 export function parseAttestation(
-  att: PrimusAttestation,
+  att: PrimusAttestationBase,
   plaintexts: Record<string, string>,
   opts: ParseOptions = {},
 ): CircuitInputs {
-  // 1. Canonical message hash the attestor signed.
-  const hash = encodeAttestation(att);
-
-  // 2. Recover pubkey from signature + hash. noble's recoverPublicKey returns
-  //    an affine point; uncompressed serialization is `0x04 || X || Y`.
-  const { r, s, v, compact } = splitSignature(att.signatures[0]);
-  const signature = new secp256k1.Signature(
-    BigInt("0x" + bytesToHex(r)),
-    BigInt("0x" + bytesToHex(s)),
-  ).addRecoveryBit(v);
-  const pubkey = signature.recoverPublicKey(hash);
-  const pub65 = pubkey.toRawBytes(false); // 65 bytes
-  const pubX = pub65.slice(1, 33);
-  const pubY = pub65.slice(33, 65);
-
-  // 3. Cross-check: recovered address matches the declared attestor. If not,
-  //    the attestation was malformed or tampered with.
-  const recoveredAddr = pubkeyToAddress(pub65).toLowerCase();
-  const declaredAddr = att.attestors[0].attestorAddr.toLowerCase();
-  if (recoveredAddr !== declaredAddr) {
-    throw new Error(
-      `attestor mismatch: signature recovered to ${recoveredAddr}, expected ${declaredAddr}`,
-    );
-  }
+  const common = parseEnvelope(att);
 
   // 4. Data hashes: attestation.data is JSON like
   //    `{"shipmentStatus":"<sha256>", ...}`. Map to Noir snake_case fields.
-  const dataObj = JSON.parse(att.data) as Record<string, string>;
   const hashesByField = {} as CircuitInputs["hashes"];
   const expectedHashes = {} as Record<FieldKey, Uint8Array>;
   for (const snake of Object.keys(FIELD_MAP) as FieldKey[]) {
     const camel = FIELD_MAP[snake];
-    const hex = dataObj[camel];
+    const hex = common.dataObj[camel];
     if (typeof hex !== "string" || !/^[0-9a-f]{64}$/i.test(hex)) {
       throw new Error(`missing/invalid hash for field '${camel}' in attestation.data`);
     }
@@ -216,16 +241,7 @@ export function parseAttestation(
     if (!opts.skipSha256Check) {
       const local: Uint8Array = sha256(new TextEncoder().encode(plain));
       const expected = expectedHashes[snake];
-      let match = local.length === expected.length;
-      if (match) {
-        for (let i = 0; i < local.length; i++) {
-          if (local[i] !== expected[i]) {
-            match = false;
-            break;
-          }
-        }
-      }
-      if (!match) {
+      if (!sameBytes(local, expected)) {
         throw new Error(
           `sha256(plaintexts['${camel}']) does not match attestation.data['${camel}']` +
             ` - got ${bytesToHex(local)}, expected ${bytesToHex(expected)}`,
@@ -245,12 +261,6 @@ export function parseAttestation(
     CIRCUIT_DIMS.MAX_URL_LEN,
     "request_url",
   );
-
-  // 7. Recipient (20-byte address) and timestamp (u64 as decimal string).
-  const recipientBytes = hexToBytes(att.recipient);
-  if (recipientBytes.length !== 20) {
-    throw new Error(`recipient must be 20 bytes, got ${recipientBytes.length}`);
-  }
 
   // 8. Hints for the in-circuit extractors.
   const ship_to_hints = locateShipToHints(plaintexts[FIELD_MAP.ship_to]);
@@ -278,18 +288,92 @@ export function parseAttestation(
   }
 
   return {
-    public_key_x: Array.from(pubX),
-    public_key_y: Array.from(pubY),
-    hash: Array.from(hash),
-    signature: Array.from(compact),
+    public_key_x: Array.from(common.pubX),
+    public_key_y: Array.from(common.pubY),
+    hash: Array.from(common.hash),
+    signature: Array.from(common.compact),
     allowed_url,
     request_url,
-    recipient: Array.from(recipientBytes),
+    recipient: Array.from(common.recipientBytes),
     timestamp: String(att.timestamp),
     expected_status,
     hashes: hashesByField,
     contents: contentsByField,
     ship_to_hints,
     grand_total_len,
+  };
+}
+
+export function parseDeliveryCodeAttestation(
+  att: PrimusAttestationBase,
+  plaintexts: Record<string, string>,
+  opts: ParseOptions = {},
+): DeliveryCodeCircuitInputs {
+  const common = parseEnvelope(att);
+  const hashesByField = {} as DeliveryCodeCircuitInputs["hashes"];
+  const expectedHashes = {} as Record<DeliveryCodeFieldKey, Uint8Array>;
+
+  for (const snake of Object.keys(
+    DELIVERY_CODE_FIELD_MAP,
+  ) as DeliveryCodeFieldKey[]) {
+    const camel = DELIVERY_CODE_FIELD_MAP[snake];
+    const hex = common.dataObj[camel];
+    if (typeof hex !== "string" || !/^[0-9a-f]{64}$/i.test(hex)) {
+      throw new Error(`missing/invalid hash for field '${camel}' in attestation.data`);
+    }
+    const bytes = hexToBytes(hex);
+    expectedHashes[snake] = bytes;
+    hashesByField[snake] = Array.from(bytes);
+  }
+
+  const contentsByField = {} as DeliveryCodeCircuitInputs["contents"];
+  const maxByField: Record<DeliveryCodeFieldKey, number> = {
+    delivery_status: DELIVERY_CODE_DIMS.MAX_DELIVERY_STATUS_LEN,
+    pickup_code: DELIVERY_CODE_DIMS.MAX_PICKUP_CODE_HTML_LEN,
+    order_id: DELIVERY_CODE_DIMS.MAX_DELIVERY_ORDER_ID_HTML_LEN,
+  };
+  for (const snake of Object.keys(
+    DELIVERY_CODE_FIELD_MAP,
+  ) as DeliveryCodeFieldKey[]) {
+    const camel = DELIVERY_CODE_FIELD_MAP[snake];
+    const plain = plaintexts[camel];
+    if (typeof plain !== "string") {
+      throw new Error(`plaintexts['${camel}'] missing`);
+    }
+    contentsByField[snake] = toBoundedVec(plain, maxByField[snake], camel);
+    if (!opts.skipSha256Check) {
+      const local: Uint8Array = sha256(new TextEncoder().encode(plain));
+      const expected = expectedHashes[snake];
+      if (!sameBytes(local, expected)) {
+        throw new Error(
+          `sha256(plaintexts['${camel}']) does not match attestation.data['${camel}']` +
+            ` - got ${bytesToHex(local)}, expected ${bytesToHex(expected)}`,
+        );
+      }
+    }
+  }
+
+  const allowed_url = toBoundedVec(
+    AMAZON_SHIP_TRACK_ALLOWED_URL,
+    DELIVERY_CODE_DIMS.MAX_DELIVERY_URL_LEN,
+    "allowed_url",
+  );
+  const request_url = toBoundedVec(
+    att.request.url,
+    DELIVERY_CODE_DIMS.MAX_DELIVERY_URL_LEN,
+    "request_url",
+  );
+
+  return {
+    public_key_x: Array.from(common.pubX),
+    public_key_y: Array.from(common.pubY),
+    hash: Array.from(common.hash),
+    signature: Array.from(common.compact),
+    allowed_url,
+    request_url,
+    recipient: Array.from(common.recipientBytes),
+    timestamp: String(att.timestamp),
+    hashes: hashesByField,
+    contents: contentsByField,
   };
 }

@@ -20,7 +20,7 @@
 
 // noble-hashes v2 ships ESM subpath exports as `./sha3.js` etc.
 import { keccak_256 } from "@noble/hashes/sha3.js";
-import type { PrimusAttestation } from "./types.js";
+import type { PrimusAttestationBase } from "./types.js";
 
 // Byte arrays returned by browser `TextEncoder().encode()` and noble hashes
 // are declared `Uint8Array<ArrayBufferLike>` (the type TS 5 widens to so
@@ -62,7 +62,7 @@ function addressBytes(addr: string): Bytes {
   return b;
 }
 
-function encodeRequest(req: PrimusAttestation["request"]): Bytes {
+function encodeRequest(req: PrimusAttestationBase["request"]): Bytes {
   const packed = concat(
     new TextEncoder().encode(req.url),
     new TextEncoder().encode(req.header),
@@ -72,7 +72,7 @@ function encodeRequest(req: PrimusAttestation["request"]): Bytes {
   return keccak_256(packed);
 }
 
-function encodeResponse(rr: PrimusAttestation["reponseResolve"]): Bytes {
+function encodeResponse(rr: PrimusAttestationBase["reponseResolve"]): Bytes {
   // The SDK does rolling keccak: acc starts as "0x" (empty bytes), and each
   // iteration wraps the previous `acc` (as `bytes`) with the next triple.
   // Because "bytes" is packed raw, folding left-to-right is equivalent to
@@ -90,7 +90,7 @@ function encodeResponse(rr: PrimusAttestation["reponseResolve"]): Bytes {
 }
 
 // Returns the 32-byte keccak256 digest that Primus' attestor signs.
-export function encodeAttestation(att: PrimusAttestation): Bytes {
+export function encodeAttestation(att: PrimusAttestationBase): Bytes {
   const packed = concat(
     addressBytes(att.recipient),
     encodeRequest(att.request),

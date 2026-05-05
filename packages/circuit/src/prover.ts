@@ -18,7 +18,9 @@ import {
   UltraHonkBackend,
   type ProofData,
 } from "@aztec/bb.js";
-import type { CircuitInputs } from "./types.js";
+import type { AnyCircuitInputs } from "./types.js";
+
+export { Barretenberg };
 
 export interface ProverInit {
   circuit: CompiledCircuit;
@@ -29,6 +31,10 @@ export interface ProverInit {
   // Force a specific bb.js backend. In browsers, leave undefined (bb.js
   // auto-picks WasmWorker). In Node tests, pass `BackendType.Wasm`.
   backend?: BackendType;
+  // Optional existing bb.js runtime. Use this when proving multiple
+  // circuits in one page so each circuit gets its own Noir/UltraHonk wrapper
+  // without spawning another Barretenberg WASM instance.
+  bb?: Barretenberg;
 }
 
 export class AttestationProver {
@@ -36,6 +42,7 @@ export class AttestationProver {
   private noir: Noir | null = null;
   private api: Barretenberg | null = null;
   private backend: UltraHonkBackend | null = null;
+  private ownsApi = false;
 
   constructor(init: ProverInit) {
     this.init_opts = init;
@@ -44,18 +51,24 @@ export class AttestationProver {
   async init(): Promise<void> {
     if (this.noir && this.backend && this.api) return;
     this.noir = new Noir(this.init_opts.circuit);
-    const opts: { threads?: number; backend?: BackendType } = {};
-    if (this.init_opts.threads != null) opts.threads = this.init_opts.threads;
-    if (this.init_opts.backend != null) opts.backend = this.init_opts.backend;
-    // `Barretenberg.new` calls `initSRSChonk()` internally when an
-    // explicit Wasm/WasmWorker backend is selected; calling it again
-    // here traps the WASM with an "already initialized" unreachable.
-    this.api = await Barretenberg.new(opts);
+    if (this.init_opts.bb) {
+      this.api = this.init_opts.bb;
+      this.ownsApi = false;
+    } else {
+      const opts: { threads?: number; backend?: BackendType } = {};
+      if (this.init_opts.threads != null) opts.threads = this.init_opts.threads;
+      if (this.init_opts.backend != null) opts.backend = this.init_opts.backend;
+      // `Barretenberg.new` calls `initSRSChonk()` internally when an
+      // explicit Wasm/WasmWorker backend is selected; calling it again
+      // here traps the WASM with an "already initialized" unreachable.
+      this.api = await Barretenberg.new(opts);
+      this.ownsApi = true;
+    }
     this.backend = new UltraHonkBackend(this.init_opts.circuit.bytecode, this.api);
   }
 
   async execute(
-    inputs: CircuitInputs,
+    inputs: AnyCircuitInputs,
   ): Promise<{ witness: Uint8Array; returnValue: unknown }> {
     if (!this.noir) await this.init();
     const { witness, returnValue } = await this.noir!.execute(
@@ -64,7 +77,7 @@ export class AttestationProver {
     return { witness, returnValue };
   }
 
-  async prove(inputs: CircuitInputs): Promise<ProofData> {
+  async prove(inputs: AnyCircuitInputs): Promise<ProofData> {
     if (!this.backend || !this.noir) await this.init();
     const { witness } = await this.noir!.execute(
       inputs as unknown as InputMap,
@@ -78,9 +91,12 @@ export class AttestationProver {
   }
 
   async destroy(): Promise<void> {
-    await this.api?.destroy();
+    if (this.ownsApi) {
+      await this.api?.destroy();
+    }
     this.api = null;
     this.backend = null;
     this.noir = null;
+    this.ownsApi = false;
   }
 }

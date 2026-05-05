@@ -5,7 +5,7 @@
 // proof's public outputs.
 
 import { BarretenbergSync } from "@aztec/bb.js";
-import { CIRCUIT_DIMS } from "./types.js";
+import { CIRCUIT_DIMS, DELIVERY_CODE_DIMS } from "./types.js";
 
 // ===== ASCII / decimal helpers =====
 
@@ -21,6 +21,38 @@ export function fieldToAsciiString(fieldHex: string, len: number): string {
     v >>= 8n;
   }
   return new TextDecoder().decode(out);
+}
+
+function fieldToByte(fieldHex: string): number {
+  const value = BigInt(fieldHex);
+  if (value < 0n || value > 255n) {
+    throw new Error(`public input byte out of range: ${fieldHex}`);
+  }
+  return Number(value);
+}
+
+function publicByteArrayToString(
+  publicInputs: readonly string[],
+  start: number,
+  len: number,
+): string {
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = fieldToByte(publicInputs[start + i]);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function publicBoundedVecToString(
+  publicInputs: readonly string[],
+  start: number,
+  max: number,
+): string {
+  const len = Number(BigInt(publicInputs[start + max]));
+  if (len < 0 || len > max) {
+    throw new Error(`public BoundedVec len ${len} exceeds max ${max}`);
+  }
+  return publicByteArrayToString(publicInputs, start, len);
 }
 
 // Render integer cents as `$X,XXX.XX` for human display.
@@ -172,5 +204,56 @@ export function decodePublicOutputs(
     grandTotalCents: BigInt(publicInputs[IDX_GRAND_TOTAL]),
     addressCommitment: BigInt(publicInputs[IDX_ADDRESS_COMMITMENT]),
     nullifier: BigInt(publicInputs[IDX_NULLIFIER]),
+  };
+}
+
+const DELIVERY_URL_FIELDS = 1 + DELIVERY_CODE_DIMS.MAX_DELIVERY_URL_LEN;
+const IDX_DELIVERY_ALLOWED_URL = 32 + 32 + 32;
+const IDX_DELIVERY_REQUEST_URL = IDX_DELIVERY_ALLOWED_URL + DELIVERY_URL_FIELDS;
+const IDX_DELIVERY_RECIPIENT = IDX_DELIVERY_REQUEST_URL + DELIVERY_URL_FIELDS;
+const IDX_DELIVERY_TIMESTAMP = IDX_DELIVERY_RECIPIENT + 20;
+const IDX_DELIVERY_HASHES = IDX_DELIVERY_TIMESTAMP + 1;
+const IDX_DELIVERY_PICKUP_CODE = IDX_DELIVERY_HASHES + 3 * 32;
+const IDX_DELIVERY_ORDER_ID =
+  IDX_DELIVERY_PICKUP_CODE + DELIVERY_CODE_DIMS.PICKUP_CODE_BYTES;
+export const DELIVERY_CODE_PUBLIC_INPUTS_LENGTH =
+  IDX_DELIVERY_ORDER_ID + DELIVERY_CODE_DIMS.ORDER_ID_BYTES;
+
+export interface DecodedDeliveryCodeOutputs {
+  allowedUrl: string;
+  requestUrl: string;
+  pickupCode: string;
+  orderId: string;
+}
+
+export function decodeDeliveryCodePublicOutputs(
+  publicInputs: readonly string[],
+): DecodedDeliveryCodeOutputs {
+  if (publicInputs.length !== DELIVERY_CODE_PUBLIC_INPUTS_LENGTH) {
+    throw new Error(
+      `publicInputs length ${publicInputs.length} != expected ${DELIVERY_CODE_PUBLIC_INPUTS_LENGTH}`,
+    );
+  }
+  return {
+    allowedUrl: publicBoundedVecToString(
+      publicInputs,
+      IDX_DELIVERY_ALLOWED_URL,
+      DELIVERY_CODE_DIMS.MAX_DELIVERY_URL_LEN,
+    ),
+    requestUrl: publicBoundedVecToString(
+      publicInputs,
+      IDX_DELIVERY_REQUEST_URL,
+      DELIVERY_CODE_DIMS.MAX_DELIVERY_URL_LEN,
+    ),
+    pickupCode: publicByteArrayToString(
+      publicInputs,
+      IDX_DELIVERY_PICKUP_CODE,
+      DELIVERY_CODE_DIMS.PICKUP_CODE_BYTES,
+    ),
+    orderId: publicByteArrayToString(
+      publicInputs,
+      IDX_DELIVERY_ORDER_ID,
+      DELIVERY_CODE_DIMS.ORDER_ID_BYTES,
+    ),
   };
 }

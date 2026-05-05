@@ -1,6 +1,6 @@
 // Attestation JSON shape as produced by @primuslabs/zktls-js-sdk's
 // `verifyAttestation` callback. Note `reponseResolve` (typo is in the SDK).
-// `_plaintexts` is our sidecar, added by AttestPurchaseBrowser on download.
+// Downloaded frontend fixtures add sidecars through flow-specific types below.
 
 export interface PrimusRequest {
   url: string;
@@ -20,7 +20,7 @@ export interface PrimusAttestor {
   url: string;
 }
 
-export interface PrimusAttestation {
+export interface PrimusAttestationBase {
   recipient: string;
   request: PrimusRequest;
   // typo preserved: this is the key the SDK emits
@@ -32,8 +32,28 @@ export interface PrimusAttestation {
   attestors: PrimusAttestor[];
   signatures: string[]; // 0x-prefixed 65-byte hex (r|s|v)
   requestid: string;
-  // our download sidecar: plaintexts keyed by keyName
-  _plaintexts?: Record<string, string>;
+}
+
+export interface AmazonOrderSummaryAttestation extends PrimusAttestationBase {
+  _plaintexts: {
+    shipmentStatus: string;
+    productTitle: string;
+    shipTo: string;
+    grandTotal: string;
+  };
+}
+
+export interface AmazonDeliveryCodeAttestation extends PrimusAttestationBase {
+  _plaintexts: {
+    deliveryStatus: string;
+    pickupCode: string;
+    orderId: string;
+  };
+  _values: {
+    deliveryStatus: string;
+    pickupCode: string;
+    orderId: string;
+  };
 }
 
 // What the circuit expects. Fields map 1:1 to `main.nr`'s params.
@@ -74,6 +94,30 @@ export interface CircuitInputs {
   grand_total_len: number;
 }
 
+export interface DeliveryCodeCircuitInputs {
+  public_key_x: number[]; // 32
+  public_key_y: number[]; // 32
+  hash: number[]; // 32
+  signature: number[]; // 64 (r|s, no v)
+  allowed_url: { storage: number[]; len: number };
+  // Public full ship-track URL.
+  request_url: { storage: number[]; len: number };
+  recipient: number[]; // 20
+  timestamp: string;
+  hashes: {
+    delivery_status: number[]; // 32
+    pickup_code: number[]; // 32
+    order_id: number[]; // 32
+  };
+  contents: {
+    delivery_status: { storage: number[]; len: number };
+    pickup_code: { storage: number[]; len: number };
+    order_id: { storage: number[]; len: number };
+  };
+}
+
+export type AnyCircuitInputs = CircuitInputs | DeliveryCodeCircuitInputs;
+
 // Circuit parameters that must stay in sync with `lib/src/lib.nr`.
 export const CIRCUIT_DIMS = {
   MAX_URL_LEN: 128,
@@ -91,6 +135,15 @@ export const CIRCUIT_DIMS = {
   // Max bytes in the shipment-status needle (">Delivered ",
   // ">Arriving ", future variants). Must stay <= 32 to fit SubString32.
   MAX_STATUS_NEEDLE_LEN: 16,
+} as const;
+
+export const DELIVERY_CODE_DIMS = {
+  MAX_DELIVERY_URL_LEN: 256,
+  MAX_DELIVERY_STATUS_LEN: 128,
+  MAX_PICKUP_CODE_HTML_LEN: 128,
+  MAX_DELIVERY_ORDER_ID_HTML_LEN: 256,
+  PICKUP_CODE_BYTES: 6,
+  ORDER_ID_BYTES: 19,
 } as const;
 
 // Canonical status needles: byte-identical to the strings the Noir
@@ -126,3 +179,11 @@ export const FIELD_MAP = {
 } as const;
 
 export type FieldKey = keyof typeof FIELD_MAP;
+
+export const DELIVERY_CODE_FIELD_MAP = {
+  delivery_status: "deliveryStatus",
+  pickup_code: "pickupCode",
+  order_id: "orderId",
+} as const;
+
+export type DeliveryCodeFieldKey = keyof typeof DELIVERY_CODE_FIELD_MAP;

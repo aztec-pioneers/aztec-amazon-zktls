@@ -2,19 +2,57 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { getPrimus } from "@/lib/primus-client";
+import {
+  ProveDeliveryCode,
+  type ProveDeliveryCodeProps,
+} from "./ProveDeliveryCode";
 
 type Status = "idle" | "running" | "success" | "error";
 
-type DeliveryCodeResult = {
+type DeliveryFieldRow = {
+  key: string;
   signedHash: string;
+  localHash: string;
   plaintext: string;
+  value: string;
+  source: string;
   verified: boolean | null;
 };
 
+type JsonResponseRow = {
+  id?: string;
+  content?: string;
+};
+
+const DELIVERY_STATUS_FIELD = "deliveryStatus";
+const DELIVERY_STATUS_XPATH =
+  '//*[@id="topContent-container"]/section[@class="pt-card promise-card"]/h1[1]';
 const PICKUP_CODE_FIELD = "pickupCode";
 const PICKUP_CODE_XPATH = '//*[@id="pickupInformation-container"]/h1[1]';
+const ORDER_ID_FIELD = "orderId";
+const ORDER_ID_XPATH =
+  '//*[@id="ordersInPackage-container"]/div[1]/div[1]/a[1]/@href';
+const FIELD_PATHS = [
+  {
+    key: DELIVERY_STATUS_FIELD,
+    xpath: DELIVERY_STATUS_XPATH,
+    valueFromPlaintext: (plaintext: string) => normalizedTextContent(plaintext),
+  },
+  {
+    key: PICKUP_CODE_FIELD,
+    xpath: PICKUP_CODE_XPATH,
+    valueFromPlaintext: (plaintext: string) =>
+      normalizedTextContent(plaintext).replace(/^Your pickup code is\s+/i, ""),
+  },
+  {
+    key: ORDER_ID_FIELD,
+    xpath: ORDER_ID_XPATH,
+    valueFromPlaintext: (plaintext: string) => extractOrderId(plaintext),
+  },
+] as const;
+const FIELD_KEYS = FIELD_PATHS.map((f) => f.key);
 const RECIPIENT = `0x${"00".repeat(20)}`;
-const DEFAULT_TEMPLATE_ID = "580ea452-cbbf-4644-ab43-991f3bdd73b3";
+const DEFAULT_TEMPLATE_ID = "c08ac1d3-851e-472a-8591-00dfacf3c2d7";
 
 function envOr(value: string | undefined, fallback: string): string {
   const trimmed = value?.trim();
@@ -40,6 +78,10 @@ function getUrlParam(urlString: string, key: string): string {
   }
 }
 
+function getOrderIdParam(urlString: string): string {
+  return getUrlParam(urlString, "orderId") || getUrlParam(urlString, "orderID");
+}
+
 const DEFAULTS = {
   itemId: envOr(
     process.env.NEXT_PUBLIC_AMAZON_DELIVERY_CODE_ITEM_ID,
@@ -55,7 +97,7 @@ const DEFAULTS = {
   ),
   orderId: envOr(
     process.env.NEXT_PUBLIC_AMAZON_DELIVERY_CODE_ORDER_ID,
-    getUrlParam(DEFAULT_DELIVERY_URL, "orderId"),
+    getOrderIdParam(DEFAULT_DELIVERY_URL),
   ),
   shipmentId: envOr(
     process.env.NEXT_PUBLIC_AMAZON_DELIVERY_CODE_SHIPMENT_ID,
@@ -71,6 +113,10 @@ async function sha256Hex(text: string): Promise<string> {
   return Array.from(new Uint8Array(buf))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function isSha256Hex(value: string): boolean {
+  return /^[0-9a-f]{64}$/i.test(value);
 }
 
 function rawElementSlice(
@@ -111,6 +157,25 @@ function normalizedTextContent(html: string): string {
   );
 }
 
+function extractOrderId(plaintext: string): string {
+  let href = plaintext;
+  if (plaintext.trimStart().startsWith("<")) {
+    const parsed = new DOMParser().parseFromString(plaintext, "text/html");
+    href = parsed.querySelector("a")?.getAttribute("href") ?? plaintext;
+  }
+  try {
+    const url = new URL(href, "https://www.amazon.com");
+    return (
+      url.searchParams.get("orderID") ??
+      url.searchParams.get("orderId") ??
+      href.match(/\borderI[Dd]=([^&]+)/)?.[1] ??
+      ""
+    );
+  } catch {
+    return href.match(/\borderI[Dd]=([^&]+)/)?.[1] ?? "";
+  }
+}
+
 function extractByXPath(html: string, xpath: string): string | null {
   try {
     const doc = new DOMParser().parseFromString(html, "text/html");
@@ -120,8 +185,11 @@ function extractByXPath(html: string, xpath: string): string | null {
       null,
       XPathResult.FIRST_ORDERED_NODE_TYPE,
       null,
-    ).singleNodeValue as Element | null;
+    ).singleNodeValue as Node | null;
     if (!node) return null;
+    if (node.nodeType === Node.ATTRIBUTE_NODE) return (node as Attr).value;
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+    if (!(node instanceof Element)) return node.textContent ?? "";
 
     const serialized = node.outerHTML;
     const openTagEnd = serialized.indexOf(">");
@@ -146,6 +214,174 @@ function extractByXPath(html: string, xpath: string): string | null {
   } catch {
     return null;
   }
+}
+
+function rawAttributeCandidate(
+  html: string,
+  xpath: string,
+): { plaintext: string; sourceKind: string } | null {
+  const match = xpath.match(/^(.*)\/@([A-Za-z_:][\w:.-]*)$/);
+  if (!match) return null;
+  const [, elementXPath, attrName] = match;
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const node = doc.evaluate(
+      elementXPath,
+      doc,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null,
+    ).singleNodeValue as Node | null;
+    if (!(node instanceof Element)) return null;
+
+    const rawElement = extractByXPath(html, elementXPath) ?? node.outerHTML;
+    const openTagEnd = rawElement.indexOf(">");
+    const rawOpenTag =
+      openTagEnd === -1 ? rawElement : rawElement.substring(0, openTagEnd + 1);
+    const attrRe = new RegExp(
+      `\\s${attrName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}=(["'])(.*?)\\1`,
+      "i",
+    );
+    const attrMatch = rawOpenTag.match(attrRe);
+    return attrMatch
+      ? { plaintext: attrMatch[2], sourceKind: "raw-attr" }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function xpathPlaintextCandidates(
+  html: string,
+  xpath: string,
+): { plaintext: string; sourceKind: string }[] {
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const node = doc.evaluate(
+      xpath,
+      doc,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null,
+    ).singleNodeValue as Node | null;
+    if (!node) return [];
+    if (node.nodeType === Node.ATTRIBUTE_NODE) {
+      const rawAttr = rawAttributeCandidate(html, xpath);
+      return [
+        ...(rawAttr ? [rawAttr] : []),
+        { plaintext: (node as Attr).value, sourceKind: "attr" },
+      ];
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent?.trim() ?? "";
+      return text ? [{ plaintext: text, sourceKind: "text" }] : [];
+    }
+    if (!(node instanceof Element)) {
+      const text = node.textContent?.trim() ?? "";
+      return text ? [{ plaintext: text, sourceKind: "text" }] : [];
+    }
+
+    const candidates: { plaintext: string; sourceKind: string }[] = [];
+    const seen = new Set<string>();
+    const add = (plaintext: string | null | undefined, sourceKind: string) => {
+      const value = plaintext ?? "";
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      candidates.push({ plaintext: value, sourceKind });
+    };
+
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType !== Node.TEXT_NODE) continue;
+      add(child.textContent?.trim(), "direct-text");
+    }
+    add(node.textContent?.trim(), "text-content");
+    add(extractByXPath(html, xpath), "outer-html");
+    add(node.outerHTML, "serialized-html");
+    return candidates;
+  } catch {
+    return [];
+  }
+}
+
+async function resolveSignedPlaintext({
+  allJson,
+  key,
+  xpath,
+  signedHash,
+}: {
+  allJson: JsonResponseRow[] | null;
+  key: string;
+  xpath: string;
+  signedHash: string;
+}): Promise<{
+  plaintext: string;
+  localHash: string;
+  source: string;
+  verified: boolean | null;
+}> {
+  const candidates = Array.isArray(allJson)
+    ? allJson
+        .map((entry, index) => ({
+          id: entry.id ?? "",
+          content: entry.content ?? "",
+          index,
+        }))
+        .filter((entry) => entry.content)
+    : [];
+  const canCheck = isSha256Hex(signedHash);
+
+  const check = async (plaintext: string) => {
+    const localHash = await sha256Hex(plaintext);
+    return {
+      localHash,
+      verified: canCheck
+        ? localHash.toLowerCase() === signedHash.toLowerCase()
+        : null,
+    };
+  };
+
+  const sameId = candidates.filter((entry) => entry.id === key);
+  const ordered = [
+    ...sameId,
+    ...candidates.filter((entry) => entry.id !== key),
+  ];
+
+  for (const entry of ordered) {
+    const { localHash, verified } = await check(entry.content);
+    if (verified) {
+      return {
+        plaintext: entry.content,
+        localHash,
+        source: `allJson[${entry.index}]${entry.id ? `:${entry.id}` : ""}`,
+        verified,
+      };
+    }
+  }
+
+  let firstExtracted:
+    | { plaintext: string; localHash: string; verified: boolean | null; source: string }
+    | null = null;
+  for (const entry of ordered) {
+    const candidates = xpathPlaintextCandidates(entry.content, xpath);
+    for (const candidate of candidates) {
+      const { localHash, verified } = await check(candidate.plaintext);
+      const source = `xpath-${candidate.sourceKind}(allJson[${entry.index}]${
+        entry.id ? `:${entry.id}` : ""
+      })`;
+      const row = { plaintext: candidate.plaintext, localHash, verified, source };
+      if (!firstExtracted) firstExtracted = row;
+      if (verified) return row;
+    }
+  }
+
+  if (firstExtracted) return firstExtracted;
+
+  return {
+    plaintext: "(missing)",
+    localHash: "",
+    source: "missing",
+    verified: null,
+  };
 }
 
 function buildLaunchPage(params: {
@@ -193,7 +429,7 @@ export default function AttestDeliveryCode() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [attestation, setAttestation] = useState<unknown>(null);
-  const [result, setResult] = useState<DeliveryCodeResult | null>(null);
+  const [result, setResult] = useState<DeliveryFieldRow[] | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
 
   const launchPage = useMemo(
@@ -211,6 +447,15 @@ export default function AttestDeliveryCode() {
 
   const log = (line: string) =>
     setLogs((prev) => [...prev, `[${new Date().toISOString()}] ${line}`]);
+
+  const handleTrackingUrlChange = useCallback((value: string) => {
+    setBaseUrl(value);
+    setItemId(getUrlParam(value, "itemId"));
+    setRef(getUrlParam(value, "ref"));
+    setPackageIndex(getUrlParam(value, "packageIndex"));
+    setOrderId(getOrderIdParam(value));
+    setShipmentId(getUrlParam(value, "shipmentId"));
+  }, []);
 
   const handleAttest = useCallback(async () => {
     if (!TEMPLATE_ID) {
@@ -237,7 +482,7 @@ export default function AttestDeliveryCode() {
       attRequest.setAdditionParams(JSON.stringify({ launch_page: launchPage }));
       attRequest.setAttConditions(
         [
-          [{ field: PICKUP_CODE_FIELD, op: "SHA256_EX" }],
+          FIELD_KEYS.map((field) => ({ field, op: "SHA256_EX" })),
         ] as unknown as Parameters<typeof attRequest.setAttConditions>[0],
       );
       attRequest.setAllJsonResponseFlag("true");
@@ -276,28 +521,30 @@ export default function AttestDeliveryCode() {
         requestid
           ? (primus.getAllJsonResponse(requestid) as unknown)
           : null
-      ) as { id: string; content: string }[] | null;
-      const fullBody =
-        Array.isArray(allJson) && allJson[0] ? allJson[0].content : "";
-      const extracted = extractByXPath(fullBody, PICKUP_CODE_XPATH);
-      const signedHash = hashes[PICKUP_CODE_FIELD] ?? "(missing)";
-
-      let verified: boolean | null = null;
-      if (extracted !== null && /^[0-9a-f]{64}$/i.test(signedHash)) {
-        const localHash = await sha256Hex(extracted);
-        verified = localHash.toLowerCase() === signedHash.toLowerCase();
-      }
+      ) as JsonResponseRow[] | null;
+      const rows = await Promise.all(
+        FIELD_PATHS.map(async ({ key, xpath, valueFromPlaintext }) => {
+          const signedHash = hashes[key] ?? "(missing)";
+          const resolved = await resolveSignedPlaintext({
+            allJson,
+            key,
+            xpath,
+            signedHash,
+          });
+          const value =
+            resolved.plaintext !== "(missing)"
+              ? valueFromPlaintext(resolved.plaintext)
+              : "";
+          return { key, signedHash, value, ...resolved };
+        }),
+      );
 
       console.log("[primus] delivery-code attestation", att);
-      console.log("[primus] full response body length", fullBody.length);
-      console.log("[primus] pickupCode plaintext", extracted);
+      console.log("[primus] delivery-code allJson", allJson);
+      console.log("[primus] delivery-code rows", rows);
 
       setAttestation(att);
-      setResult({
-        signedHash,
-        plaintext: extracted ?? "(missing)",
-        verified,
-      });
+      setResult(rows);
       setStatus("success");
     } catch (e) {
       const msg = e instanceof Error ? e.message : JSON.stringify(e);
@@ -311,9 +558,12 @@ export default function AttestDeliveryCode() {
     if (!attestation) return;
     const payload = {
       ...(attestation as Record<string, unknown>),
-      _plaintexts: {
-        pickupCode: result?.plaintext ?? "",
-      },
+      _plaintexts: result
+        ? Object.fromEntries(result.map((r) => [r.key, r.plaintext]))
+        : {},
+      _values: result
+        ? Object.fromEntries(result.map((r) => [r.key, r.value]))
+        : {},
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: "application/json",
@@ -336,7 +586,7 @@ export default function AttestDeliveryCode() {
           <input
             type="text"
             value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
+            onChange={(e) => handleTrackingUrlChange(e.target.value)}
             disabled={status === "running"}
           />
         </label>
@@ -419,30 +669,59 @@ export default function AttestDeliveryCode() {
       {status === "success" && result && (
         <section className="result">
           <h2>Delivery code attestation</h2>
-          <div className="field-card">
-            <div className="field-card-header">
-              <strong>
-                pickupCode{" "}
-                <span
-                  className={`match-pill match-${String(result.verified)}`}
-                  title="local sha256(plaintext) vs signed hash"
-                >
-                  {result.verified === true
-                    ? "match"
-                    : result.verified === false
-                      ? "mismatch"
-                      : "unchecked"}
-                </span>
-              </strong>
-              <code title="signed sha256">{result.signedHash}</code>
+          {result.map((row) => (
+            <div className="field-card" key={row.key}>
+              <div className="field-card-header">
+                <strong>
+                  {row.key}{" "}
+                  <span
+                    className={`match-pill match-${String(row.verified)}`}
+                    title="local sha256(plaintext) vs signed hash"
+                  >
+                    {row.verified === true
+                      ? "match"
+                      : row.verified === false
+                        ? "mismatch"
+                        : "unchecked"}
+                  </span>
+                </strong>
+                <code title="signed sha256">{row.signedHash}</code>
+              </div>
+              {row.localHash ? (
+                <p className="field-value">
+                  <span>local sha256</span>
+                  <code>{row.localHash}</code>
+                </p>
+              ) : null}
+              <p className="field-value">
+                <span>source</span>
+                <code>{row.source}</code>
+              </p>
+              {row.value ? (
+                <p className="field-value">
+                  <span>value</span>
+                  <code>{row.value}</code>
+                </p>
+              ) : null}
+              <pre title="extracted plaintext hashed by Primus">{row.plaintext}</pre>
             </div>
-            <pre title="extracted outer HTML">{result.plaintext}</pre>
-          </div>
+          ))}
           <button type="button" onClick={handleDownload}>
             Download attestation.json
           </button>
         </section>
       )}
+
+      {status === "success" && attestation !== null && result ? (
+        <ProveDeliveryCode
+          attestation={
+            attestation as ProveDeliveryCodeProps["attestation"]
+          }
+          plaintexts={Object.fromEntries(
+            result.map((r): [string, string] => [r.key, r.plaintext]),
+          )}
+        />
+      ) : null}
 
       {attestation !== null && (
         <details>

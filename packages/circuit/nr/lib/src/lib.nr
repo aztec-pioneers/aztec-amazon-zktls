@@ -27,6 +27,7 @@
 use sha256::sha256_var;
 
 pub mod asin;
+pub mod delivery_code;
 pub mod grand_total;
 pub mod internal;
 pub mod nullifier;
@@ -35,6 +36,7 @@ pub mod status;
 pub mod url;
 
 pub global MAX_URL_LEN: u32 = 128;
+pub global MAX_DELIVERY_URL_LEN: u32 = 256;
 
 // Per-field outer-HTML byte ceilings. Picked generously above what the
 // Amazon order template currently emits. Shrink when bounded by real
@@ -46,6 +48,14 @@ pub global MAX_SHIP_TO_LEN: u32 = 1024;
 // grandTotal is ~89 bytes ($0.28 wrapped in <span>); 128 leaves room for
 // longer dollar values up to $999,999.99.
 pub global MAX_GRAND_TOTAL_LEN: u32 = 128;
+// Delivery-code fields from the ship-track page. The current fixture is
+// pickupCode=72 bytes and orderId anchor=146 bytes; keep slack for Amazon
+// attribute churn while preserving bounded SHA/search costs.
+pub global MAX_DELIVERY_STATUS_LEN: u32 = 128;
+pub global MAX_PICKUP_CODE_HTML_LEN: u32 = 128;
+pub global MAX_DELIVERY_ORDER_ID_HTML_LEN: u32 = 256;
+pub global PICKUP_CODE_BYTES: u32 = 6;
+pub global ORDER_ID_BYTES: u32 = 19;
 
 // shipTo line bounds (trimmed content; whitespace inside the <li>
 // wrapper is verified separately via anchor checks).
@@ -94,6 +104,23 @@ pub struct PublicOutputs {
     pub address_commitment: Field,  // poseidon2 over packed name|street|csz|country
     pub nullifier: Field,           // poseidon2(pack(signature))
     pub shipment_date: Field,       // mocked to 0; real extraction is a v2 follow-up
+}
+
+pub struct DeliveryCodeContents {
+    pub delivery_status: BoundedVec<u8, MAX_DELIVERY_STATUS_LEN>,
+    pub pickup_code: BoundedVec<u8, MAX_PICKUP_CODE_HTML_LEN>,
+    pub order_id: BoundedVec<u8, MAX_DELIVERY_ORDER_ID_HTML_LEN>,
+}
+
+pub struct DeliveryCodeHashes {
+    pub delivery_status: [u8; 32],
+    pub pickup_code: [u8; 32],
+    pub order_id: [u8; 32],
+}
+
+pub struct DeliveryCodePublicOutputs {
+    pub pickup_code: [u8; PICKUP_CODE_BYTES],
+    pub order_id: [u8; ORDER_ID_BYTES],
 }
 
 // Single high-level entrypoint. `bin/main.nr::main` and downstream Aztec
@@ -182,4 +209,57 @@ pub fn verify(
         nullifier,
         shipment_date: 0,
     }
+}
+
+pub fn verify_delivery_code(
+    public_key_x: [u8; 32],
+    public_key_y: [u8; 32],
+    hash: [u8; 32],
+    signature: [u8; 64],
+    allowed_url: BoundedVec<u8, MAX_DELIVERY_URL_LEN>,
+    request_url: BoundedVec<u8, MAX_DELIVERY_URL_LEN>,
+    recipient: [u8; 20],
+    timestamp: u64,
+    hashes: DeliveryCodeHashes,
+    contents: DeliveryCodeContents,
+) -> DeliveryCodePublicOutputs {
+    assert(
+        std::ecdsa_secp256k1::verify_signature(
+            public_key_x, public_key_y, signature, hash,
+        ),
+        "attestor signature invalid",
+    );
+
+    url::assert_prefix(allowed_url, request_url);
+
+    assert(
+        sha256_var(
+            contents.delivery_status.storage(),
+            contents.delivery_status.len() as u32,
+        ) == hashes.delivery_status,
+        "delivery_status sha256 mismatch",
+    );
+    assert(
+        sha256_var(
+            contents.pickup_code.storage(),
+            contents.pickup_code.len() as u32,
+        ) == hashes.pickup_code,
+        "pickup_code sha256 mismatch",
+    );
+    assert(
+        sha256_var(
+            contents.order_id.storage(),
+            contents.order_id.len() as u32,
+        ) == hashes.order_id,
+        "order_id sha256 mismatch",
+    );
+
+    status::assert_delivery_status_delivered(contents.delivery_status);
+    let pickup_code = delivery_code::extract_pickup_code(contents.pickup_code);
+    let order_id = delivery_code::extract_order_id(contents.order_id);
+
+    let _ = recipient;
+    let _ = timestamp;
+
+    DeliveryCodePublicOutputs { pickup_code, order_id }
 }
